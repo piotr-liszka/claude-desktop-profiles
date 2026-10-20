@@ -4,39 +4,46 @@ Guidance for AI agents and contributors working in this repository.
 
 ## What this is
 
-A small, dependency-free tool that creates one launcher per profile so several accounts of an Electron desktop app (Claude Desktop by default) can run side by side. Each launcher starts the app with its own `--user-data-dir`. See `README.md` for usage.
+A small, dependency-free tool that gives each account of an Electron desktop app (Claude Desktop by default) its own profile so several accounts can run side by side. On macOS a profile is a copy of the app with its own name, icon, data folder and environment. See `README.md` for usage.
 
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
 | `claude-profiles` | Bash script for macOS and Linux. The whole tool lives in this one file. |
-| `claude-profiles.ps1` | PowerShell script for Windows. Same commands, same behavior. |
-| `tests/run.sh` | Tests, run in a throwaway `HOME`. `LIVE=1` also starts a fake app. |
+| `claude-profiles.ps1` | PowerShell script for Windows. Fewer features (see the README). |
+| `tests/run.sh` | Tests, run in a throwaway `HOME` against a fake app. `LIVE=1` also starts it. |
 | `README.md` | User-facing docs. Keep it short and simple. |
+
+## How a macOS profile works
+
+- `make_macos_copy` clones the installed app (`cp -c`), then edits only the clone: new `CFBundleIdentifier` and `CFBundleDisplayName`, a new icon (and `CFBundleIconName` removed so it wins), and `CFBundleExecutable` pointing at a generated `profile-launch` script. That script exports the profile's environment and `exec`s the real executable with `--user-data-dir`. The clone is then signed ad hoc.
+- **`CFBundleName` must not change.** Electron derives the names of its helper apps from it; changing it makes the app crash with "Unable to find helper app".
+- Restricted entitlements (keychain access groups, application identifier) cannot survive an ad-hoc signature, so the copy is signed without entitlements. Say so wherever features could be affected.
+- `--shared-app` and Linux use a launcher instead. The launcher functions (`match_main_pid`, `find_pid`, `activate_pid`, `launch_profile`) are copied into each generated script with `declare -f`, so they may use only system tools and no globals.
 
 ## Rules
 
-- **Never modify the target app.** No patching, re-signing or writing inside the app bundle. The tool only creates launchers and reads the process list.
+- **Never modify the installed app.** Only edit the clone, and only after it is a complete copy. Build in a `.partial` folder and move it into place only when signing succeeded.
 - **No network access, no downloads, no dependencies.** Use only tools that ship with the OS. Do not add an installer, package manager step or `curl | sh`.
-- **Bash 3.2 compatible.** macOS ships bash 3.2: no associative arrays, no `mapfile`, no `${var,,}`. Do not use `set -e`; handle errors explicitly. Do not `source` or `eval` any file the tool wrote.
-- **The launcher is self-contained.** `match_main_pid`, `find_pid`, `activate_pid` and `launch_profile` are copied into every generated launcher with `declare -f`. They must use only system tools and no globals, and changing them changes what users already have installed only after they re-run `add`.
-- **Deletion is guarded.** `rm -rf` only runs on a launcher the tool created (it carries the profile marker) or on a profile folder that passed `safe_to_purge` and was confirmed. Keep it that way, and keep the bash and PowerShell versions equally strict.
-- **Validate input.** Labels are `[A-Za-z0-9_-]`, 32 characters at most. Paths are made absolute and `..` is rejected. Quote every expansion; profile paths contain spaces on macOS (`Application Support`).
+- **Bash 3.2 compatible.** macOS ships bash 3.2: no associative arrays, no `mapfile`, no `${var,,}`, and `"${array[@]}"` on an empty array fails under `set -u`. Do not use `set -e`; handle errors explicitly. Do not `source` or `eval` any file the tool wrote.
+- **Deletion is guarded.** `rm -rf` only runs on a profile the tool created (it carries `profile.conf`) or on a folder that passed `safe_to_purge` and was confirmed. `safe_to_purge` must keep refusing `$HOME`, `~/.claude`, the app's own default folder, symlinks and relative paths. Keep the bash and PowerShell versions equally strict.
+- **Validate input.** Labels are `[A-Za-z0-9_-]`, 32 characters at most. Environment names are `[A-Za-z_][A-Za-z0-9_]*`. Paths are made absolute and `..` is rejected. Quote every expansion; paths contain spaces on macOS (`Application Support`).
 - **Never overwrite something the tool did not create.** Refuse and say why.
-- **Keep parity.** A behavior change in `claude-profiles` needs the same change in `claude-profiles.ps1`, or a note in the README that the platforms differ.
+- **Do not touch system settings.** In particular, do not change the default handler for `claude://` or other URL schemes, and do not edit Launch Services or Dock preferences.
+- **Keep parity or document the gap.** A behavior change in `claude-profiles` needs the same change in `claude-profiles.ps1`, or a note in the README's platform table.
 
 ## Testing
 
 ```bash
 bash -n claude-profiles
 tests/run.sh
-LIVE=1 tests/run.sh   # macOS/Linux only; starts a fake `sleep` app
+LIVE=1 tests/run.sh   # macOS/Linux; starts a fake `sleep` app and draws a badge
 ```
 
-Add a test for every new behavior and every bug fix. Tests must never touch the real `HOME`, a real Claude profile or a real Claude app: use the fake app in `tests/run.sh`.
+Add a test for every new behavior and every bug fix. Tests must never touch the real `HOME`, a real Claude profile or the real Claude app: use the fake app in `tests/run.sh`. If you try the tool against the real Claude app, use `--dest`, `--data-dir` and `--config-dir` pointing at a scratch folder, and clean up afterwards.
 
-`claude-profiles.ps1` has not been run on Windows. Say so when you change it, and do not describe it as tested.
+`claude-profiles.ps1` has not been run on Windows, and the Linux path has not been run on Linux. Say so when you change them, and do not describe them as tested.
 
 ## Style
 

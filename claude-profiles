@@ -1,40 +1,52 @@
 #!/bin/bash
 # claude-profiles: run several signed-in profiles of an Electron desktop app
-# (Claude Desktop by default) side by side, each with its own launcher.
+# (Claude Desktop by default) side by side.
 #
-# Each launcher starts the app with its own --user-data-dir, so every profile
-# keeps its own login, history and settings. The app itself is never modified.
-# Supports macOS and Linux. On Windows use claude-profiles.ps1.
+# macOS: every profile gets its own copy of the app (an APFS clone, so it uses
+#   almost no disk space) with its own name, icon, data folder and, for Claude,
+#   its own Claude Code config folder. That gives each profile its own Dock tile.
+# Linux: a launcher that starts the app with its own data folder.
+# Windows: see claude-profiles.ps1.
+# The installed app is never modified.
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 TOOL="claude-profiles"
 DEFAULT_APP_NAME="Claude"
 KEY_PREFIX="X-ClaudeProfiles-"   # custom keys in Linux .desktop files
 
 die() { echo "$TOOL: $*" >&2; exit 1; }
+warn() { echo "$TOOL: $*" >&2; }
 
 usage() {
   cat <<EOF
 $TOOL $VERSION: run several signed-in profiles of a desktop app side by side
 
 Usage:
-  $TOOL add <label> [options]      create a launcher with its own profile
-  $TOOL list [--dest DIR]          show launchers and whether they are running
-  $TOOL launch <label>             start a profile, or focus it if it is running
-  $TOOL remove <label> [--purge]   delete the launcher (and optionally its data)
+  $TOOL add <label> [options]      create a profile: its own app, icon, data and settings
+  $TOOL list                       show profiles and whether they are running
+  $TOOL launch <label>             start a profile, or bring it to the front
+  $TOOL update [label]             rebuild app copies from the installed app (run after an app update)
+  $TOOL env <label>                print export lines so a terminal can use the profile's settings
+  $TOOL remove <label> [--purge]   delete the profile's app (and optionally its data)
   $TOOL doctor                     show what was detected on this machine
 
-Options:
-  --app PATH        app to launch: a .app bundle (macOS) or an executable (Linux)
-                    default: auto-detected Claude Desktop
-  --data-dir PATH   profile folder (default: <app default folder>-<label>)
-  --dest DIR        where launchers are written
-                    default: ~/Applications (macOS), ~/.local/share/applications (Linux)
-  --icon PATH       launcher icon (.icns on macOS, icon name or path on Linux)
-  --purge           with remove: also delete the profile folder (asks first)
-  -y, --yes         skip the confirmation prompt for --purge
-  --dry-run         print what would happen without changing anything
+Options for add:
+  --app PATH          app to use: a .app bundle (macOS) or an executable (Linux)
+                      default: auto-detected Claude Desktop
+  --icon PATH         icon for the profile: .icns, or an image such as .png
+                      default: the app's icon with a coloured badge (macOS)
+  --no-badge          keep the app's own icon
+  --data-dir PATH     profile folder (default: <app default folder>-<label>)
+  --config-dir PATH   Claude Code config folder (default: ~/.claude-<label>)
+  --no-config-dir     do not give the profile its own Claude Code config folder
+  --env NAME=VALUE    extra environment variable for the app (repeatable)
+  --shared-app        macOS: do not copy the app; start the installed app through
+                      a launcher instead (every profile then shares one Dock tile)
+  --dest DIR          where profiles are created
+                      default: ~/Applications (macOS), ~/.local/share/applications (Linux)
+  --dry-run           print what would happen without changing anything
 
+Other options: --purge and -y/--yes (with remove).
 Labels may contain letters, digits, '-' and '_'.
 EOF
 }
@@ -55,11 +67,22 @@ check_label() {
   [ "${#1}" -le 32 ] || die "label '$1' is too long (max 32 characters)"
 }
 
+check_env_pair() {
+  case "$1" in
+    [A-Za-z_]*=*) ;;
+    *) die "invalid --env '$1': use NAME=VALUE" ;;
+  esac
+  case "${1%%=*}" in
+    *[!A-Za-z0-9_]*) die "invalid environment variable name in '$1'" ;;
+  esac
+  case "$1" in *$'\n'*) die "--env must not contain a newline" ;; esac
+}
+
 slugify() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '-'; }
 
-xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
-
 conf_get() { sed -n "s/^$2=//p" "$1" | head -n 1; }
+conf_all() { sed -n "s/^$2=//p" "$1"; }
+ckey() { if [ "$OS" = macos ]; then echo "$1"; else echo "${KEY_PREFIX}$1"; fi; }
 
 # --- paths ------------------------------------------------------------------
 
@@ -137,49 +160,239 @@ activate_pid() {
   esac
 }
 
+# launch_profile APP DATA_DIR [NAME=VALUE ...]
 launch_profile() {
-  local app="$1" data_dir="$2" pid
+  local app="$1" data_dir="$2" pid arg
+  shift 2
   pid=$(find_pid "$data_dir")
   if [ -n "$pid" ]; then
     activate_pid "$pid"
     return 0
   fi
   case "$(uname -s)" in
-    Darwin) open -n -a "$app" --args "--user-data-dir=$data_dir" ;;
-    *) nohup "$app" "--user-data-dir=$data_dir" >/dev/null 2>&1 & ;;
+    Darwin)
+      if [ $# -gt 0 ]; then
+        local flags=()
+        for arg in "$@"; do flags[${#flags[@]}]="--env"; flags[${#flags[@]}]="$arg"; done
+        open -n -a "$app" "${flags[@]}" --args "--user-data-dir=$data_dir"
+      else
+        open -n -a "$app" --args "--user-data-dir=$data_dir"
+      fi ;;
+    *) nohup env "$@" "$app" "--user-data-dir=$data_dir" >/dev/null 2>&1 & ;;
   esac
 }
 
-# --- creating launchers -----------------------------------------------------
+# --- icons (macOS) ----------------------------------------------------------
 
-write_launcher_script() { # path app data_dir
+plist_get() { /usr/libexec/PlistBuddy -c "Print :$2" "$1" 2>/dev/null; }
+
+plist_set() { # file key value
+  /usr/libexec/PlistBuddy -c "Set :$2 \"$3\"" "$1" >/dev/null 2>&1 ||
+    /usr/libexec/PlistBuddy -c "Add :$2 string \"$3\"" "$1" >/dev/null 2>&1 ||
+    die "cannot set $2 in $1"
+}
+
+# Draws the app's icon full-bleed (macOS then applies its own rounded mask) and
+# adds a badge with the label's first letter. Arguments: app, output png, label.
+badge_script() {
+  cat <<'EOF'
+ObjC.import('AppKit');
+function run(argv) {
+  const [appPath, outPath, label] = argv;
+  const S = 1024;
+  const base = $.NSWorkspace.sharedWorkspace.iconForFile($(appPath));
+
+  // Normalise the icon to 1024 points and measure its opaque tile.
+  const norm = $.NSImage.alloc.initWithSize($.NSMakeSize(S, S));
+  norm.lockFocus;
+  base.drawInRectFromRectOperationFraction($.NSMakeRect(0, 0, S, S), $.NSZeroRect, $.NSCompositingOperationSourceOver, 1.0);
+  norm.unlockFocus;
+  const rep = $.NSBitmapImageRep.imageRepWithData(norm.TIFFRepresentation);
+  const pw = rep.pixelsWide, ph = rep.pixelsHigh, k = S / pw, step = 12;
+  let minX = pw, minY = ph, maxX = 0, maxY = 0;
+  for (let y = 0; y < ph; y += step) {
+    for (let x = 0; x < pw; x += step) {
+      if (rep.colorAtXY(x, y).alphaComponent > 0.5) {
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX <= minX || maxY <= minY) throw new Error('empty icon');
+  const bx = minX * k, bw = (maxX - minX + step) * k;
+  const by = S - (maxY + step) * k, bh = (maxY - minY + step) * k;
+  // Background: a point just inside the tile's left edge, at mid height.
+  const bg = rep.colorAtXY(Math.round(minX + (maxX - minX) * 0.08), Math.round((minY + maxY) / 2));
+
+  const out = $.NSImage.alloc.initWithSize($.NSMakeSize(S, S));
+  out.lockFocus;
+  bg.setFill;
+  $.NSBezierPath.fillRect($.NSMakeRect(0, 0, S, S));
+  norm.drawInRectFromRectOperationFraction($.NSMakeRect(0, 0, S, S), $.NSMakeRect(bx, by, bw, bh), $.NSCompositingOperationSourceOver, 1.0);
+
+  let h = 0;
+  for (const c of label) h = (h * 31 + c.charCodeAt(0)) % 360;
+  const fill = $.NSColor.colorWithHueSaturationBrightnessAlpha(h / 360, 0.7, 0.85, 1);
+  const d = 320, m = 96, ring = 14;
+  $.NSColor.whiteColor.setFill;
+  $.NSBezierPath.bezierPathWithOvalInRect($.NSMakeRect(S - d - m - ring, m - ring, d + 2 * ring, d + 2 * ring)).fill;
+  fill.setFill;
+  $.NSBezierPath.bezierPathWithOvalInRect($.NSMakeRect(S - d - m, m, d, d)).fill;
+  const attrs = $.NSMutableDictionary.alloc.init;
+  attrs.setObjectForKey($.NSFont.boldSystemFontOfSize(220), $.NSFontAttributeName);
+  attrs.setObjectForKey($.NSColor.whiteColor, $.NSForegroundColorAttributeName);
+  const letter = $(label.charAt(0).toUpperCase());
+  const sz = letter.sizeWithAttributes(attrs);
+  letter.drawAtPointWithAttributes($.NSMakePoint(S - d - m + (d - sz.width) / 2, m + (d - sz.height) / 2), attrs);
+  out.unlockFocus;
+
+  const orep = $.NSBitmapImageRep.imageRepWithData(out.TIFFRepresentation);
+  orep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $.NSDictionary.dictionary).writeToFileAtomically($(outPath), true);
+  return 'ok';
+}
+EOF
+}
+
+# make_icns SRC OUT: SRC is an .icns (copied) or an image sips can read.
+make_icns() {
+  local src="$1" out="$2" tmp iconset s rc
+  case "$src" in *.icns) cp "$src" "$out"; return $? ;; esac
+  [ -f "$src" ] || return 1
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/$TOOL.XXXXXX") || return 1
+  iconset="$tmp/icon.iconset"
+  mkdir "$iconset"
+  rc=0
+  for s in 16 32 128 256 512; do
+    sips -z "$s" "$s" "$src" --out "$iconset/icon_${s}x${s}.png" >/dev/null 2>&1 || rc=1
+    sips -z "$((s * 2))" "$((s * 2))" "$src" --out "$iconset/icon_${s}x${s}@2x.png" >/dev/null 2>&1 || rc=1
+  done
+  [ "$rc" = 0 ] && iconutil -c icns "$iconset" -o "$out" >/dev/null 2>&1 || rc=1
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+badge_icns() { # app out label
+  local tmp rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/$TOOL.XXXXXX") || return 1
+  osascript -l JavaScript -e "$(badge_script)" "$1" "$tmp/badge.png" "$3" >/dev/null 2>&1 &&
+    [ -f "$tmp/badge.png" ] && make_icns "$tmp/badge.png" "$2"
+  rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+# --- creating profiles ------------------------------------------------------
+
+write_conf() { # file label app data_dir mode env_lines
+  local line
+  {
+    echo "$(ckey LABEL)=$2"
+    echo "$(ckey APP)=$3"
+    echo "$(ckey DATA_DIR)=$4"
+    echo "$(ckey MODE)=$5"
+    while IFS= read -r line; do
+      [ -n "$line" ] && echo "$(ckey ENV)=$line"
+    done <<<"$6"
+    echo "$(ckey CREATED_BY)=$TOOL $VERSION"
+  } >> "$1" || die "cannot write $1"
+}
+
+write_launcher_script() { # path app data_dir env_lines
+  local line
   {
     echo '#!/bin/bash'
     echo "# Generated by $TOOL $VERSION. Re-run '$TOOL add' to regenerate."
     declare -f match_main_pid find_pid activate_pid launch_profile
-    printf 'launch_profile %q %q\n' "$2" "$3"
+    printf 'launch_profile %q %q' "$2" "$3"
+    while IFS= read -r line; do
+      [ -n "$line" ] && printf ' %q' "$line"
+    done <<<"$4"
+    echo
   } > "$1" && chmod +x "$1" || die "cannot write $1"
 }
 
-make_macos_launcher() { # name label app data_dir dest icon
-  local name="$1" label="$2" app="$3" data_dir="$4" dest="$5" icon="$6"
-  local bundle="$dest/$name.app" icon_file="" src
-  if [ -e "$bundle" ] && [ ! -f "$bundle/Contents/Resources/profile.conf" ]; then
-    die "'$bundle' exists and was not created by $TOOL; refusing to overwrite it"
+# Refuses to replace anything that this tool did not create.
+check_ours() { # path marker-file
+  if [ -e "$1" ] && [ ! -f "$2" ]; then
+    die "'$1' exists and was not created by $TOOL; refusing to overwrite it"
   fi
+}
+
+# A copy of the app with its own name, icon, data folder and environment.
+make_macos_copy() { # name label app data_dir dest icon no_badge env_lines
+  local name="$1" label="$2" app="$3" data_dir="$4" dest="$5" icon="$6" no_badge="$7" env_lines="$8"
+  local bundle="$dest/$name.app" tmp="$dest/.$name.app.partial" info exe line icns
+  info="$tmp/Contents/Info.plist"
+  icns="$tmp/Contents/Resources/profile.icns"
+
+  check_ours "$bundle" "$bundle/Contents/Resources/profile.conf"
+  [ -z "$(find_pid "$data_dir")" ] || die "profile '$label' is running; quit it first"
+  command -v codesign >/dev/null || die "codesign not found"
+
+  rm -rf "$tmp"
+  echo "Copying $app (an APFS clone: almost no extra disk space)..." >&2
+  cp -cR "$app" "$tmp" 2>/dev/null || { rm -rf "$tmp"; cp -R "$app" "$tmp"; } || die "could not copy '$app'"
+  xattr -cr "$tmp" 2>/dev/null
+  mkdir -p "$tmp/Contents/Resources" || { rm -rf "$tmp"; die "cannot prepare the copy"; }
+
+  exe=$(plist_get "$info" CFBundleExecutable)
+  [ -n "$exe" ] && [ -x "$tmp/Contents/MacOS/$exe" ] || { rm -rf "$tmp"; die "'$app' has no executable to wrap"; }
+
+  # Identity: a new bundle ID and display name give the profile its own Dock tile.
+  # CFBundleName stays: Electron derives the names of its helper apps from it.
+  plist_set "$info" CFBundleIdentifier "local.$TOOL.$(slugify "$name")"
+  plist_set "$info" CFBundleDisplayName "$name"
+
+  if [ -n "$icon" ]; then
+    make_icns "$icon" "$icns" || { rm -rf "$tmp"; die "could not use '$icon' as an icon"; }
+  elif [ "$no_badge" != 1 ]; then
+    badge_icns "$app" "$icns" "$label" || warn "could not draw a badge (needs a desktop session); keeping the app's own icon"
+  fi
+  if [ -f "$icns" ]; then
+    plist_set "$info" CFBundleIconFile profile.icns
+    /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$info" >/dev/null 2>&1   # else the app's own icon wins
+  fi
+
+  # The profile's own entry point: sets the environment and the data folder.
+  {
+    echo '#!/bin/bash'
+    echo "# Generated by $TOOL $VERSION. Starts the app with this profile's data and settings."
+    echo 'here="$(cd "$(dirname "$0")" && pwd)"'
+    while IFS= read -r line; do
+      [ -n "$line" ] && printf 'export %s=%q\n' "${line%%=*}" "${line#*=}"
+    done <<<"$env_lines"
+    printf 'exec "$here"/%q --user-data-dir=%q "$@"\n' "$exe" "$data_dir"
+  } > "$tmp/Contents/MacOS/profile-launch" && chmod +x "$tmp/Contents/MacOS/profile-launch" || die "cannot write the profile entry point"
+  plist_set "$info" CFBundleExecutable profile-launch
+
+  write_conf "$tmp/Contents/Resources/profile.conf" "$label" "$app" "$data_dir" copy "$env_lines"
+
+  # Editing invalidates the app's signature, so sign the copy ad hoc.
+  codesign --force --deep --sign - "$tmp" >/dev/null 2>&1 || { rm -rf "$tmp"; die "could not sign the copy"; }
+
+  rm -rf "$bundle"
+  mv "$tmp" "$bundle" || die "could not move the copy into place"
+  touch "$bundle"
+  echo "$bundle"
+}
+
+# A small launcher that starts the installed app (all profiles share its Dock tile).
+make_macos_launcher() { # name label app data_dir dest icon env_lines
+  local name="$1" label="$2" app="$3" data_dir="$4" dest="$5" icon="$6" env_lines="$7"
+  local bundle="$dest/$name.app" icon_file="" src
+  check_ours "$bundle" "$bundle/Contents/Resources/profile.conf"
   rm -rf "$bundle"
   mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" || die "cannot create $bundle"
-  write_launcher_script "$bundle/Contents/MacOS/launch" "$app" "$data_dir"
+  write_launcher_script "$bundle/Contents/MacOS/launch" "$app" "$data_dir" "$env_lines"
 
-  # Reuse the app's own icon unless --icon was given.
   if [ -n "$icon" ]; then
-    src="$icon"
+    make_icns "$icon" "$bundle/Contents/Resources/icon.icns" && icon_file='  <key>CFBundleIconFile</key><string>icon</string>'
   else
-    src=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$app/Contents/Info.plist" 2>/dev/null)
-    case "$src" in '' ) ;; *.icns) src="$app/Contents/Resources/$src" ;; *) src="$app/Contents/Resources/$src.icns" ;; esac
-  fi
-  if [ -n "$src" ] && [ -f "$src" ] && cp "$src" "$bundle/Contents/Resources/icon.icns"; then
-    icon_file='  <key>CFBundleIconFile</key><string>icon</string>'
+    src=$(plist_get "$app/Contents/Info.plist" CFBundleIconFile)
+    case "$src" in '') ;; *.icns) src="$app/Contents/Resources/$src" ;; *) src="$app/Contents/Resources/$src.icns" ;; esac
+    if [ -n "$src" ] && [ -f "$src" ] && cp "$src" "$bundle/Contents/Resources/icon.icns"; then
+      icon_file='  <key>CFBundleIconFile</key><string>icon</string>'
+    fi
   fi
 
   cat > "$bundle/Contents/Info.plist" <<EOF
@@ -187,28 +400,21 @@ make_macos_launcher() { # name label app data_dir dest icon
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>$(xml_escape "$name")</string>
-  <key>CFBundleDisplayName</key><string>$(xml_escape "$name")</string>
+  <key>CFBundleName</key><string>$(printf '%s' "$name" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')</string>
   <key>CFBundleIdentifier</key><string>local.$TOOL.$(slugify "$name")</string>
   <key>CFBundleExecutable</key><string>launch</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
-  <key>CFBundleShortVersionString</key><string>$VERSION</string>
 $icon_file
 </dict>
 </plist>
 EOF
-  cat > "$bundle/Contents/Resources/profile.conf" <<EOF
-LABEL=$label
-APP=$app
-DATA_DIR=$data_dir
-CREATED_BY=$TOOL $VERSION
-EOF
+  write_conf "$bundle/Contents/Resources/profile.conf" "$label" "$app" "$data_dir" shared "$env_lines"
   echo "$bundle"
 }
 
-make_linux_launcher() { # name label app data_dir dest icon
-  local name="$1" label="$2" app="$3" data_dir="$4" dest="$5" icon="$6"
+make_linux_launcher() { # name label app data_dir dest icon env_lines
+  local name="$1" label="$2" app="$3" data_dir="$4" dest="$5" icon="$6" env_lines="$7"
   local slug script_dir script desktop
   slug=$(slugify "$name")
   script_dir="${XDG_DATA_HOME:-$HOME/.local/share}/$TOOL"
@@ -219,7 +425,7 @@ make_linux_launcher() { # name label app data_dir dest icon
     die "'$desktop' exists and was not created by $TOOL; refusing to overwrite it"
   fi
   mkdir -p "$script_dir" "$dest" || die "cannot create launcher folders"
-  write_launcher_script "$script" "$app" "$data_dir"
+  write_launcher_script "$script" "$app" "$data_dir" "$env_lines"
   {
     echo "[Desktop Entry]"
     echo "Type=Application"
@@ -228,31 +434,27 @@ make_linux_launcher() { # name label app data_dir dest icon
     echo "Terminal=false"
     echo "Categories=Network;"
     [ -n "$icon" ] && echo "Icon=$icon"
-    echo "${KEY_PREFIX}LABEL=$label"
-    echo "${KEY_PREFIX}APP=$app"
-    echo "${KEY_PREFIX}DATA_DIR=$data_dir"
-    echo "${KEY_PREFIX}SCRIPT=$script"
   } > "$desktop" || die "cannot write $desktop"
+  write_conf "$desktop" "$label" "$app" "$data_dir" shared "$env_lines"
+  echo "${KEY_PREFIX}SCRIPT=$script" >> "$desktop"
   echo "$desktop"
 }
 
-# --- finding existing launchers --------------------------------------------
+# --- finding existing profiles ---------------------------------------------
 
-# Prints one tab-separated line per launcher: label, launcher path, app, data dir.
+launcher_conf() { # path
+  if [ "$OS" = macos ]; then echo "$1/Contents/Resources/profile.conf"; else echo "$1"; fi
+}
+
+# Prints one tab-separated line per profile: label, path, app, data dir.
 list_launchers() { # dest
   local f conf
-  if [ "$OS" = macos ]; then
-    for f in "$1"/*.app; do
-      conf="$f/Contents/Resources/profile.conf"
-      [ -f "$conf" ] || continue
-      printf '%s\t%s\t%s\t%s\n' "$(conf_get "$conf" LABEL)" "$f" "$(conf_get "$conf" APP)" "$(conf_get "$conf" DATA_DIR)"
-    done
-  else
-    for f in "$1"/*.desktop; do
-      grep -q "^${KEY_PREFIX}LABEL=" "$f" 2>/dev/null || continue
-      printf '%s\t%s\t%s\t%s\n' "$(conf_get "$f" "${KEY_PREFIX}LABEL")" "$f" "$(conf_get "$f" "${KEY_PREFIX}APP")" "$(conf_get "$f" "${KEY_PREFIX}DATA_DIR")"
-    done
-  fi
+  for f in "$1"/*.app "$1"/*.desktop; do
+    [ -e "$f" ] || continue
+    conf=$(launcher_conf "$f")
+    [ -f "$conf" ] && grep -q "^$(ckey LABEL)=" "$conf" 2>/dev/null || continue
+    printf '%s\t%s\t%s\t%s\n' "$(conf_get "$conf" "$(ckey LABEL)")" "$f" "$(conf_get "$conf" "$(ckey APP)")" "$(conf_get "$conf" "$(ckey DATA_DIR)")"
+  done
 }
 
 find_launcher() { # dest label -> the matching list_launchers line
@@ -266,19 +468,25 @@ find_launcher() { # dest label -> the matching list_launchers line
 # --- commands ---------------------------------------------------------------
 
 parse_opts() {
-  OPT_APP="" OPT_DATA_DIR="" OPT_DEST="" OPT_ICON="" OPT_DRY=0 OPT_PURGE=0 OPT_YES=0 LABEL=""
+  OPT_APP="" OPT_DATA_DIR="" OPT_DEST="" OPT_ICON="" OPT_CONFIG_DIR="" OPT_ENV=""
+  OPT_NO_BADGE=0 OPT_NO_CONFIG=0 OPT_SHARED=0 OPT_DRY=0 OPT_PURGE=0 OPT_YES=0 LABEL=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --app)      [ $# -ge 2 ] || die "--app needs a value";      OPT_APP="$2"; shift 2 ;;
-      --data-dir) [ $# -ge 2 ] || die "--data-dir needs a value"; OPT_DATA_DIR="$2"; shift 2 ;;
-      --dest)     [ $# -ge 2 ] || die "--dest needs a value";     OPT_DEST="$2"; shift 2 ;;
-      --icon)     [ $# -ge 2 ] || die "--icon needs a value";     OPT_ICON="$2"; shift 2 ;;
-      --purge)    OPT_PURGE=1; shift ;;
-      -y | --yes) OPT_YES=1; shift ;;
-      --dry-run)  OPT_DRY=1; shift ;;
-      -h | --help) usage; exit 0 ;;
-      -*)         die "unknown option '$1'" ;;
-      *)          [ -z "$LABEL" ] || die "unexpected argument '$1'"; LABEL="$1"; shift ;;
+      --app)        [ $# -ge 2 ] || die "--app needs a value";        OPT_APP="$2"; shift 2 ;;
+      --data-dir)   [ $# -ge 2 ] || die "--data-dir needs a value";   OPT_DATA_DIR="$2"; shift 2 ;;
+      --dest)       [ $# -ge 2 ] || die "--dest needs a value";       OPT_DEST="$2"; shift 2 ;;
+      --icon)       [ $# -ge 2 ] || die "--icon needs a value";       OPT_ICON="$2"; shift 2 ;;
+      --config-dir) [ $# -ge 2 ] || die "--config-dir needs a value"; OPT_CONFIG_DIR="$2"; shift 2 ;;
+      --env)        [ $# -ge 2 ] || die "--env needs a value"; check_env_pair "$2"; OPT_ENV="$OPT_ENV$2"$'\n'; shift 2 ;;
+      --no-badge)      OPT_NO_BADGE=1; shift ;;
+      --no-config-dir) OPT_NO_CONFIG=1; shift ;;
+      --shared-app)    OPT_SHARED=1; shift ;;
+      --purge)         OPT_PURGE=1; shift ;;
+      -y | --yes)      OPT_YES=1; shift ;;
+      --dry-run)       OPT_DRY=1; shift ;;
+      -h | --help)     usage; exit 0 ;;
+      -*)              die "unknown option '$1'" ;;
+      *)               [ -z "$LABEL" ] || die "unexpected argument '$1'"; LABEL="$1"; shift ;;
     esac
   done
   if [ -n "$OPT_DEST" ]; then DEST=$(absolute_path "$OPT_DEST") || exit 1; else DEST=$(default_dest); fi
@@ -288,7 +496,7 @@ cmd_add() {
   [ -n "$LABEL" ] || die "add needs a label, e.g. '$TOOL add Work'"
   check_label "$LABEL"
 
-  local app="$OPT_APP" name data_dir launcher_name
+  local app="$OPT_APP" name data_dir launcher_name mode config_dir env_lines
   if [ -z "$app" ]; then
     app=$(default_app) || die "could not find $DEFAULT_APP_NAME; pass --app PATH"
   fi
@@ -300,8 +508,11 @@ cmd_add() {
   fi
 
   name=$(app_name "$app")
-  case "$name" in '' | .* ) die "cannot derive a name from '$app'" ;; esac
+  case "$name" in '' | .* | *[\"\\]*) die "cannot derive a usable name from '$app'" ;; esac
   launcher_name="$name $LABEL"
+
+  if [ "$OS" = macos ] && [ "$OPT_SHARED" != 1 ]; then mode=copy; else mode=shared; fi
+  if [ "$OPT_SHARED" = 1 ] && [ "$OS" != macos ]; then warn "--shared-app has no effect on this platform"; fi
 
   if [ -n "$OPT_DATA_DIR" ]; then
     data_dir=$(absolute_path "$OPT_DATA_DIR") || exit 1
@@ -313,52 +524,115 @@ cmd_add() {
     die "'$data_dir' is the app's own default profile; choose another --data-dir"
   fi
 
+  # Claude Code keeps its settings, history and login in ~/.claude; give each
+  # profile its own folder so the accounts stay apart.
+  env_lines="$OPT_ENV"
+  if [ "$OPT_NO_CONFIG" != 1 ] && { [ -n "$OPT_CONFIG_DIR" ] || [ "$name" = "$DEFAULT_APP_NAME" ]; }; then
+    if [ -n "$OPT_CONFIG_DIR" ]; then config_dir=$(absolute_path "$OPT_CONFIG_DIR") || exit 1; else config_dir="$HOME/.claude-$LABEL"; fi
+    case "$config_dir" in *$'\n'*) die "config dir must not contain a newline" ;; esac
+    [ "$config_dir" != "$HOME/.claude" ] || die "'$config_dir' is Claude Code's default config folder; choose another --config-dir"
+    env_lines="CLAUDE_CONFIG_DIR=$config_dir"$'\n'"$env_lines"
+  fi
+
   if [ "$OPT_DRY" = 1 ]; then
     if [ "$OS" = macos ]; then
-      echo "would create launcher: $DEST/$launcher_name.app"
+      echo "would create: $DEST/$launcher_name.app ($mode)"
     else
-      echo "would create launcher: $DEST/$(slugify "$launcher_name").desktop"
+      echo "would create: $DEST/$(slugify "$launcher_name").desktop"
     fi
     echo "  app:      $app"
     echo "  profile:  $data_dir"
+    [ -z "$env_lines" ] || printf '%s' "$env_lines" | sed 's/^/  env:      /'
     return 0
   fi
 
   mkdir -p "$DEST" || die "cannot create $DEST"
   local created
-  if [ "$OS" = macos ]; then
-    created=$(make_macos_launcher "$launcher_name" "$LABEL" "$app" "$data_dir" "$DEST" "$OPT_ICON") || exit 1
+  if [ "$mode" = copy ]; then
+    created=$(make_macos_copy "$launcher_name" "$LABEL" "$app" "$data_dir" "$DEST" "$OPT_ICON" "$OPT_NO_BADGE" "$env_lines") || exit 1
+  elif [ "$OS" = macos ]; then
+    created=$(make_macos_launcher "$launcher_name" "$LABEL" "$app" "$data_dir" "$DEST" "$OPT_ICON" "$env_lines") || exit 1
   else
-    created=$(make_linux_launcher "$launcher_name" "$LABEL" "$app" "$data_dir" "$DEST" "$OPT_ICON") || exit 1
+    created=$(make_linux_launcher "$launcher_name" "$LABEL" "$app" "$data_dir" "$DEST" "$OPT_ICON" "$env_lines") || exit 1
   fi
   cat <<EOF
 Created: $created
 Profile: $data_dir
+EOF
+  [ -z "$env_lines" ] || printf '%s' "$env_lines" | sed 's/^/Env:     /'
+  cat <<EOF
 
-Open the launcher and sign in to the account you want in this profile.
-If the sign-in page hands control back to the wrong window, quit the other
-instance while you sign in, then start it again.
+Open it and sign in to the account you want in this profile. If the sign-in
+page opens the wrong window, quit the other profile while you sign in, then
+start it again.
 EOF
 }
 
 cmd_list() {
-  local line label path app data pid status found=0
+  local line label path app data pid status mode conf found=0
   while IFS= read -r line; do
     found=1
     IFS=$'\t' read -r label path app data <<<"$line"
+    conf=$(launcher_conf "$path")
+    mode=$(conf_get "$conf" "$(ckey MODE)")
     pid=$(find_pid "$data")
     if [ -n "$pid" ]; then status="running ($pid)"; else status="stopped"; fi
-    printf '%s\n  status:   %s\n  launcher: %s\n  app:      %s\n  profile:  %s\n' "$label" "$status" "$path" "$app" "$data"
+    printf '%s\n  status:   %s\n  launcher: %s (%s)\n  app:      %s\n  profile:  %s\n' "$label" "$status" "$path" "${mode:-shared}" "$app" "$data"
+    conf_all "$conf" "$(ckey ENV)" | sed 's/^/  env:      /'
   done < <(list_launchers "$DEST")
-  [ "$found" = 1 ] || echo "no launchers found in $DEST"
+  [ "$found" = 1 ] || echo "no profiles found in $DEST"
 }
 
 cmd_launch() {
   [ -n "$LABEL" ] || die "launch needs a label"
-  local line label path app data
-  line=$(find_launcher "$DEST" "$LABEL") || die "no launcher with label '$LABEL' in $DEST"
+  local line label path app data conf mode l
+  line=$(find_launcher "$DEST" "$LABEL") || die "no profile with label '$LABEL' in $DEST"
   IFS=$'\t' read -r label path app data <<<"$line"
-  launch_profile "$app" "$data"
+  conf=$(launcher_conf "$path")
+  mode=$(conf_get "$conf" "$(ckey MODE)")
+  if [ "$mode" = copy ]; then
+    open "$path"
+  else
+    set --
+    while IFS= read -r l; do [ -n "$l" ] && set -- "$@" "$l"; done < <(conf_all "$conf" "$(ckey ENV)")
+    launch_profile "$app" "$data" "$@"
+  fi
+}
+
+cmd_update() {
+  [ "$OS" = macos ] || die "update only applies to app copies, which are macOS-only"
+  local line label path app data conf mode name dest icon env_lines tmp found=0
+  while IFS= read -r line; do
+    IFS=$'\t' read -r label path app data <<<"$line"
+    [ -z "$LABEL" ] || [ "$label" = "$LABEL" ] || continue
+    conf=$(launcher_conf "$path")
+    [ "$(conf_get "$conf" MODE)" = copy ] || continue
+    found=1
+    name=$(basename "$path" .app)
+    dest=$(dirname "$path")
+    env_lines=$(conf_all "$conf" ENV)
+    [ -d "$app" ] || die "'$app' (needed for '$label') no longer exists"
+    if [ "$OPT_DRY" = 1 ]; then echo "would rebuild: $path"; continue; fi
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/$TOOL.XXXXXX") || die "cannot create a temporary folder"
+    icon=""
+    if [ -f "$path/Contents/Resources/profile.icns" ]; then
+      cp "$path/Contents/Resources/profile.icns" "$tmp/profile.icns" && icon="$tmp/profile.icns"
+    fi
+    make_macos_copy "$name" "$label" "$app" "$data" "$dest" "$icon" 1 "$env_lines" >/dev/null || { rm -rf "$tmp"; exit 1; }
+    rm -rf "$tmp"
+    echo "updated: $path"
+  done < <(list_launchers "$DEST")
+  [ "$found" = 1 ] || die "no app copies to update${LABEL:+ for '$LABEL'} in $DEST"
+}
+
+cmd_env() {
+  [ -n "$LABEL" ] || die "env needs a label"
+  local line label path app data l
+  line=$(find_launcher "$DEST" "$LABEL") || die "no profile with label '$LABEL' in $DEST"
+  IFS=$'\t' read -r label path app data <<<"$line"
+  while IFS= read -r l; do
+    [ -n "$l" ] && printf 'export %s=%q\n' "${l%%=*}" "${l#*=}"
+  done < <(conf_all "$(launcher_conf "$path")" "$(ckey ENV)")
 }
 
 # Refuses anything that does not look like a dedicated profile folder.
@@ -367,55 +641,73 @@ safe_to_purge() { # dir app
   case "$dir" in /*) ;; *) return 1 ;; esac
   case "$dir" in */../* | */..) return 1 ;; esac
   [ "$dir" != "/" ] && [ "$dir" != "$HOME" ] || return 1
+  [ "$dir" != "$HOME/.claude" ] || return 1
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   [ "$(printf '%s' "$dir" | tr -cd '/' | wc -c)" -ge 3 ] || return 1
   [ "$dir" != "$(default_profile_dir "$(app_name "$app")")" ] || return 1
 }
 
-confirm_purge() { # dir label
+confirm_purge() { # label dir...
+  local label="$1" d answer
+  shift
   [ "$OPT_YES" = 1 ] && return 0
-  [ -t 0 ] || die "refusing to delete '$1' without a terminal; pass --yes to confirm"
-  local answer
-  printf 'This permanently deletes the profile folder:\n  %s\nType the label (%s) to confirm: ' "$1" "$2"
+  [ -t 0 ] || die "refusing to delete without a terminal; pass --yes to confirm"
+  echo "This permanently deletes:"
+  for d in "$@"; do echo "  $d"; done
+  printf 'Type the label (%s) to confirm: ' "$label"
   read -r answer
-  [ "$answer" = "$2" ]
+  [ "$answer" = "$label" ]
 }
 
 cmd_remove() {
   [ -n "$LABEL" ] || die "remove needs a label"
-  local line label path app data script found=0
+  local line label path app data conf cfg script d n found=0
   while IFS= read -r line; do
     IFS=$'\t' read -r label path app data <<<"$line"
     [ "$label" = "$LABEL" ] || continue
     found=1
+    conf=$(launcher_conf "$path")
+    cfg=$(conf_all "$conf" "$(ckey ENV)" | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -n 1)
+    set -- "$data"
+    [ -z "$cfg" ] || set -- "$@" "$cfg"
     if [ "$OPT_DRY" = 1 ]; then
-      echo "would remove launcher: $path"
-      [ "$OPT_PURGE" = 1 ] && echo "would delete profile:  $data"
+      echo "would remove: $path"
+      [ "$OPT_PURGE" = 1 ] && for d in "$@"; do echo "would delete: $d"; done
       continue
     fi
+    [ -z "$(find_pid "$data")" ] || die "profile '$LABEL' is running; quit it first"
     if [ "$OPT_PURGE" = 1 ]; then
-      if [ -n "$(find_pid "$data")" ]; then die "profile '$LABEL' is running; quit it before --purge"; fi
-      safe_to_purge "$data" "$app" || die "refusing to purge '$data': it does not look like a dedicated profile folder"
-      confirm_purge "$data" "$LABEL" || die "cancelled; nothing was deleted"
+      # Folders that were never created (the profile never ran) need no purging.
+      n=$#
+      while [ "$n" -gt 0 ]; do
+        d="$1"; shift; n=$((n - 1))
+        [ -e "$d" ] || [ -L "$d" ] && set -- "$@" "$d"
+      done
+      for d in "$@"; do
+        safe_to_purge "$d" "$app" || die "refusing to purge '$d': it does not look like a dedicated profile folder"
+      done
+      if [ $# -gt 0 ]; then confirm_purge "$LABEL" "$@" || die "cancelled; nothing was deleted"; fi
     fi
     if [ "$OS" = macos ]; then
       rm -rf "$path"
     else
-      script=$(conf_get "$path" "${KEY_PREFIX}SCRIPT")
+      script=$(conf_get "$conf" "${KEY_PREFIX}SCRIPT")
       rm -f "$path"
       case "$script" in "${XDG_DATA_HOME:-$HOME/.local/share}/$TOOL/"*.sh) rm -f "$script" ;; esac
     fi
-    echo "removed launcher: $path"
-    if [ "$OPT_PURGE" = 1 ]; then rm -rf "$data"; echo "deleted profile:  $data"; else echo "kept profile:     $data"; fi
+    echo "removed: $path"
+    for d in "$@"; do
+      if [ "$OPT_PURGE" = 1 ]; then rm -rf "$d"; echo "deleted: $d"; else echo "kept:    $d"; fi
+    done
   done < <(list_launchers "$DEST")
-  [ "$found" = 1 ] || die "no launcher with label '$LABEL' in $DEST"
+  [ "$found" = 1 ] || die "no profile with label '$LABEL' in $DEST"
 }
 
 cmd_doctor() {
-  local app
+  local app t
   echo "$TOOL $VERSION"
   echo "platform:      $OS ($(uname -m))"
-  echo "launchers in:  $DEST"
+  echo "profiles in:   $DEST"
   if app=$(default_app); then
     echo "detected app:  $app"
     echo "default data:  $(default_profile_dir "$(app_name "$app")")"
@@ -423,7 +715,9 @@ cmd_doctor() {
     echo "detected app:  none (pass --app PATH to 'add')"
   fi
   if [ "$OS" = macos ]; then
-    command -v open >/dev/null && command -v osascript >/dev/null || echo "warning: 'open' or 'osascript' is missing"
+    for t in open osascript codesign sips iconutil xattr; do
+      command -v "$t" >/dev/null || echo "warning: '$t' is missing"
+    done
   fi
 }
 
@@ -434,7 +728,7 @@ main() {
   local cmd="${1:-help}"
   [ $# -gt 0 ] && shift
   case "$cmd" in
-    add | list | launch | remove | doctor) parse_opts "$@"; "cmd_$cmd" ;;
+    add | list | launch | update | env | remove | doctor) parse_opts "$@"; "cmd_$cmd" ;;
     -h | --help | help) usage ;;
     -V | --version | version) echo "$TOOL $VERSION" ;;
     *) die "unknown command '$cmd' (try --help)" ;;
