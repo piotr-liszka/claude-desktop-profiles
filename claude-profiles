@@ -1,0 +1,445 @@
+#!/bin/bash
+# claude-profiles: run several signed-in profiles of an Electron desktop app
+# (Claude Desktop by default) side by side, each with its own launcher.
+#
+# Each launcher starts the app with its own --user-data-dir, so every profile
+# keeps its own login, history and settings. The app itself is never modified.
+# Supports macOS and Linux. On Windows use claude-profiles.ps1.
+
+VERSION="0.1.0"
+TOOL="claude-profiles"
+DEFAULT_APP_NAME="Claude"
+KEY_PREFIX="X-ClaudeProfiles-"   # custom keys in Linux .desktop files
+
+die() { echo "$TOOL: $*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+$TOOL $VERSION: run several signed-in profiles of a desktop app side by side
+
+Usage:
+  $TOOL add <label> [options]      create a launcher with its own profile
+  $TOOL list [--dest DIR]          show launchers and whether they are running
+  $TOOL launch <label>             start a profile, or focus it if it is running
+  $TOOL remove <label> [--purge]   delete the launcher (and optionally its data)
+  $TOOL doctor                     show what was detected on this machine
+
+Options:
+  --app PATH        app to launch: a .app bundle (macOS) or an executable (Linux)
+                    default: auto-detected Claude Desktop
+  --data-dir PATH   profile folder (default: <app default folder>-<label>)
+  --dest DIR        where launchers are written
+                    default: ~/Applications (macOS), ~/.local/share/applications (Linux)
+  --icon PATH       launcher icon (.icns on macOS, icon name or path on Linux)
+  --purge           with remove: also delete the profile folder (asks first)
+  -y, --yes         skip the confirmation prompt for --purge
+  --dry-run         print what would happen without changing anything
+
+Labels may contain letters, digits, '-' and '_'.
+EOF
+}
+
+detect_os() {
+  case "$(uname -s)" in
+    Darwin) OS=macos ;;
+    Linux) OS=linux ;;
+    *) die "unsupported platform '$(uname -s)'. On Windows use claude-profiles.ps1." ;;
+  esac
+}
+
+check_label() {
+  case "$1" in
+    '' | -* | *[!A-Za-z0-9_-]*)
+      die "invalid label '$1': use letters, digits, '-' and '_', not starting with '-'" ;;
+  esac
+  [ "${#1}" -le 32 ] || die "label '$1' is too long (max 32 characters)"
+}
+
+slugify() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '-'; }
+
+xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
+conf_get() { sed -n "s/^$2=//p" "$1" | head -n 1; }
+
+# --- paths ------------------------------------------------------------------
+
+default_app() {
+  local c
+  if [ "$OS" = macos ]; then
+    for c in "/Applications/$DEFAULT_APP_NAME.app" "$HOME/Applications/$DEFAULT_APP_NAME.app"; do
+      if [ -d "$c" ]; then echo "$c"; return 0; fi
+    done
+  else
+    c=$(command -v claude-desktop 2>/dev/null)
+    if [ -n "$c" ]; then echo "$c"; return 0; fi
+  fi
+  return 1
+}
+
+app_name() {
+  local base
+  base=$(basename "$1")
+  echo "${base%.app}"
+}
+
+# The folder the app uses when started without --user-data-dir.
+default_profile_dir() {
+  if [ "$OS" = macos ]; then
+    echo "$HOME/Library/Application Support/$1"
+  else
+    echo "${XDG_CONFIG_HOME:-$HOME/.config}/$1"
+  fi
+}
+
+default_dest() {
+  if [ "$OS" = macos ]; then
+    echo "$HOME/Applications"
+  else
+    echo "${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  fi
+}
+
+absolute_path() {
+  local p="$1"
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  case "$p" in */../* | */..) die "path must not contain '..': $1" ;; esac
+  while [ "${#p}" -gt 1 ] && [ "${p%/}" != "$p" ]; do p="${p%/}"; done
+  printf '%s\n' "$p"
+}
+
+# --- launching (these four functions are copied into every launcher, so they
+#     may only use system tools and no globals) ------------------------------
+
+# Reads `ps` output (pid, then command line) on stdin and prints the pid of the
+# main process started with --user-data-dir=$1. Helper processes (--type=...)
+# carry the same flag and are skipped.
+match_main_pid() {
+  awk -v dir="$1" '
+    {
+      pid = $1
+      sub(/^ *[0-9]+ +/, "")
+      if (index($0, "--type=")) next
+      needle = "--user-data-dir=" dir
+      i = index($0, needle)
+      if (!i) next
+      rest = substr($0, i + length(needle), 1)
+      if (rest == "" || rest == " ") { print pid; exit }
+    }'
+}
+
+find_pid() { ps -axww -o pid= -o command= | match_main_pid "$1"; }
+
+activate_pid() {
+  case "$(uname -s)" in
+    Darwin)
+      osascript -l JavaScript -e 'ObjC.import("AppKit"); $.NSRunningApplication.runningApplicationWithProcessIdentifier('"$1"').activateWithOptions(3)' >/dev/null 2>&1 ;;
+    *) echo "already running (pid $1)" >&2 ;;
+  esac
+}
+
+launch_profile() {
+  local app="$1" data_dir="$2" pid
+  pid=$(find_pid "$data_dir")
+  if [ -n "$pid" ]; then
+    activate_pid "$pid"
+    return 0
+  fi
+  case "$(uname -s)" in
+    Darwin) open -n -a "$app" --args "--user-data-dir=$data_dir" ;;
+    *) nohup "$app" "--user-data-dir=$data_dir" >/dev/null 2>&1 & ;;
+  esac
+}
+
+# --- creating launchers -----------------------------------------------------
+
+write_launcher_script() { # path app data_dir
+  {
+    echo '#!/bin/bash'
+    echo "# Generated by $TOOL $VERSION. Re-run '$TOOL add' to regenerate."
+    declare -f match_main_pid find_pid activate_pid launch_profile
+    printf 'launch_profile %q %q\n' "$2" "$3"
+  } > "$1" && chmod +x "$1" || die "cannot write $1"
+}
+
+make_macos_launcher() { # name label app data_dir dest icon
+  local name="$1" label="$2" app="$3" data_dir="$4" dest="$5" icon="$6"
+  local bundle="$dest/$name.app" icon_file="" src
+  if [ -e "$bundle" ] && [ ! -f "$bundle/Contents/Resources/profile.conf" ]; then
+    die "'$bundle' exists and was not created by $TOOL; refusing to overwrite it"
+  fi
+  rm -rf "$bundle"
+  mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" || die "cannot create $bundle"
+  write_launcher_script "$bundle/Contents/MacOS/launch" "$app" "$data_dir"
+
+  # Reuse the app's own icon unless --icon was given.
+  if [ -n "$icon" ]; then
+    src="$icon"
+  else
+    src=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$app/Contents/Info.plist" 2>/dev/null)
+    case "$src" in '' ) ;; *.icns) src="$app/Contents/Resources/$src" ;; *) src="$app/Contents/Resources/$src.icns" ;; esac
+  fi
+  if [ -n "$src" ] && [ -f "$src" ] && cp "$src" "$bundle/Contents/Resources/icon.icns"; then
+    icon_file='  <key>CFBundleIconFile</key><string>icon</string>'
+  fi
+
+  cat > "$bundle/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>$(xml_escape "$name")</string>
+  <key>CFBundleDisplayName</key><string>$(xml_escape "$name")</string>
+  <key>CFBundleIdentifier</key><string>local.$TOOL.$(slugify "$name")</string>
+  <key>CFBundleExecutable</key><string>launch</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+$icon_file
+</dict>
+</plist>
+EOF
+  cat > "$bundle/Contents/Resources/profile.conf" <<EOF
+LABEL=$label
+APP=$app
+DATA_DIR=$data_dir
+CREATED_BY=$TOOL $VERSION
+EOF
+  echo "$bundle"
+}
+
+make_linux_launcher() { # name label app data_dir dest icon
+  local name="$1" label="$2" app="$3" data_dir="$4" dest="$5" icon="$6"
+  local slug script_dir script desktop
+  slug=$(slugify "$name")
+  script_dir="${XDG_DATA_HOME:-$HOME/.local/share}/$TOOL"
+  script="$script_dir/$slug.sh"
+  desktop="$dest/$slug.desktop"
+  case "$script" in *[\"\`\$\\]*) die "cannot create a launcher: unsupported characters in $script" ;; esac
+  if [ -e "$desktop" ] && ! grep -q "^${KEY_PREFIX}LABEL=" "$desktop"; then
+    die "'$desktop' exists and was not created by $TOOL; refusing to overwrite it"
+  fi
+  mkdir -p "$script_dir" "$dest" || die "cannot create launcher folders"
+  write_launcher_script "$script" "$app" "$data_dir"
+  {
+    echo "[Desktop Entry]"
+    echo "Type=Application"
+    echo "Name=$name"
+    echo "Exec=\"$script\""
+    echo "Terminal=false"
+    echo "Categories=Network;"
+    [ -n "$icon" ] && echo "Icon=$icon"
+    echo "${KEY_PREFIX}LABEL=$label"
+    echo "${KEY_PREFIX}APP=$app"
+    echo "${KEY_PREFIX}DATA_DIR=$data_dir"
+    echo "${KEY_PREFIX}SCRIPT=$script"
+  } > "$desktop" || die "cannot write $desktop"
+  echo "$desktop"
+}
+
+# --- finding existing launchers --------------------------------------------
+
+# Prints one tab-separated line per launcher: label, launcher path, app, data dir.
+list_launchers() { # dest
+  local f conf
+  if [ "$OS" = macos ]; then
+    for f in "$1"/*.app; do
+      conf="$f/Contents/Resources/profile.conf"
+      [ -f "$conf" ] || continue
+      printf '%s\t%s\t%s\t%s\n' "$(conf_get "$conf" LABEL)" "$f" "$(conf_get "$conf" APP)" "$(conf_get "$conf" DATA_DIR)"
+    done
+  else
+    for f in "$1"/*.desktop; do
+      grep -q "^${KEY_PREFIX}LABEL=" "$f" 2>/dev/null || continue
+      printf '%s\t%s\t%s\t%s\n' "$(conf_get "$f" "${KEY_PREFIX}LABEL")" "$f" "$(conf_get "$f" "${KEY_PREFIX}APP")" "$(conf_get "$f" "${KEY_PREFIX}DATA_DIR")"
+    done
+  fi
+}
+
+find_launcher() { # dest label -> the matching list_launchers line
+  local line
+  while IFS= read -r line; do
+    if [ "${line%%$'\t'*}" = "$2" ]; then echo "$line"; return 0; fi
+  done < <(list_launchers "$1")
+  return 1
+}
+
+# --- commands ---------------------------------------------------------------
+
+parse_opts() {
+  OPT_APP="" OPT_DATA_DIR="" OPT_DEST="" OPT_ICON="" OPT_DRY=0 OPT_PURGE=0 OPT_YES=0 LABEL=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --app)      [ $# -ge 2 ] || die "--app needs a value";      OPT_APP="$2"; shift 2 ;;
+      --data-dir) [ $# -ge 2 ] || die "--data-dir needs a value"; OPT_DATA_DIR="$2"; shift 2 ;;
+      --dest)     [ $# -ge 2 ] || die "--dest needs a value";     OPT_DEST="$2"; shift 2 ;;
+      --icon)     [ $# -ge 2 ] || die "--icon needs a value";     OPT_ICON="$2"; shift 2 ;;
+      --purge)    OPT_PURGE=1; shift ;;
+      -y | --yes) OPT_YES=1; shift ;;
+      --dry-run)  OPT_DRY=1; shift ;;
+      -h | --help) usage; exit 0 ;;
+      -*)         die "unknown option '$1'" ;;
+      *)          [ -z "$LABEL" ] || die "unexpected argument '$1'"; LABEL="$1"; shift ;;
+    esac
+  done
+  if [ -n "$OPT_DEST" ]; then DEST=$(absolute_path "$OPT_DEST") || exit 1; else DEST=$(default_dest); fi
+}
+
+cmd_add() {
+  [ -n "$LABEL" ] || die "add needs a label, e.g. '$TOOL add Work'"
+  check_label "$LABEL"
+
+  local app="$OPT_APP" name data_dir launcher_name
+  if [ -z "$app" ]; then
+    app=$(default_app) || die "could not find $DEFAULT_APP_NAME; pass --app PATH"
+  fi
+  app=$(absolute_path "$app") || exit 1
+  if [ "$OS" = macos ]; then
+    [ -d "$app/Contents/MacOS" ] || die "'$app' is not an application bundle"
+  else
+    [ -f "$app" ] && [ -x "$app" ] || die "'$app' is not an executable file"
+  fi
+
+  name=$(app_name "$app")
+  case "$name" in '' | .* ) die "cannot derive a name from '$app'" ;; esac
+  launcher_name="$name $LABEL"
+
+  if [ -n "$OPT_DATA_DIR" ]; then
+    data_dir=$(absolute_path "$OPT_DATA_DIR") || exit 1
+  else
+    data_dir=$(default_profile_dir "$name-$LABEL")
+  fi
+  case "$data_dir" in *$'\n'*) die "data dir must not contain a newline" ;; esac
+  if [ "$data_dir" = "$(default_profile_dir "$name")" ]; then
+    die "'$data_dir' is the app's own default profile; choose another --data-dir"
+  fi
+
+  if [ "$OPT_DRY" = 1 ]; then
+    if [ "$OS" = macos ]; then
+      echo "would create launcher: $DEST/$launcher_name.app"
+    else
+      echo "would create launcher: $DEST/$(slugify "$launcher_name").desktop"
+    fi
+    echo "  app:      $app"
+    echo "  profile:  $data_dir"
+    return 0
+  fi
+
+  mkdir -p "$DEST" || die "cannot create $DEST"
+  local created
+  if [ "$OS" = macos ]; then
+    created=$(make_macos_launcher "$launcher_name" "$LABEL" "$app" "$data_dir" "$DEST" "$OPT_ICON") || exit 1
+  else
+    created=$(make_linux_launcher "$launcher_name" "$LABEL" "$app" "$data_dir" "$DEST" "$OPT_ICON") || exit 1
+  fi
+  cat <<EOF
+Created: $created
+Profile: $data_dir
+
+Open the launcher and sign in to the account you want in this profile.
+If the sign-in page hands control back to the wrong window, quit the other
+instance while you sign in, then start it again.
+EOF
+}
+
+cmd_list() {
+  local line label path app data pid status found=0
+  while IFS= read -r line; do
+    found=1
+    IFS=$'\t' read -r label path app data <<<"$line"
+    pid=$(find_pid "$data")
+    if [ -n "$pid" ]; then status="running ($pid)"; else status="stopped"; fi
+    printf '%s\n  status:   %s\n  launcher: %s\n  app:      %s\n  profile:  %s\n' "$label" "$status" "$path" "$app" "$data"
+  done < <(list_launchers "$DEST")
+  [ "$found" = 1 ] || echo "no launchers found in $DEST"
+}
+
+cmd_launch() {
+  [ -n "$LABEL" ] || die "launch needs a label"
+  local line label path app data
+  line=$(find_launcher "$DEST" "$LABEL") || die "no launcher with label '$LABEL' in $DEST"
+  IFS=$'\t' read -r label path app data <<<"$line"
+  launch_profile "$app" "$data"
+}
+
+# Refuses anything that does not look like a dedicated profile folder.
+safe_to_purge() { # dir app
+  local dir="$1" app="$2"
+  case "$dir" in /*) ;; *) return 1 ;; esac
+  case "$dir" in */../* | */..) return 1 ;; esac
+  [ "$dir" != "/" ] && [ "$dir" != "$HOME" ] || return 1
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  [ "$(printf '%s' "$dir" | tr -cd '/' | wc -c)" -ge 3 ] || return 1
+  [ "$dir" != "$(default_profile_dir "$(app_name "$app")")" ] || return 1
+}
+
+confirm_purge() { # dir label
+  [ "$OPT_YES" = 1 ] && return 0
+  [ -t 0 ] || die "refusing to delete '$1' without a terminal; pass --yes to confirm"
+  local answer
+  printf 'This permanently deletes the profile folder:\n  %s\nType the label (%s) to confirm: ' "$1" "$2"
+  read -r answer
+  [ "$answer" = "$2" ]
+}
+
+cmd_remove() {
+  [ -n "$LABEL" ] || die "remove needs a label"
+  local line label path app data script found=0
+  while IFS= read -r line; do
+    IFS=$'\t' read -r label path app data <<<"$line"
+    [ "$label" = "$LABEL" ] || continue
+    found=1
+    if [ "$OPT_DRY" = 1 ]; then
+      echo "would remove launcher: $path"
+      [ "$OPT_PURGE" = 1 ] && echo "would delete profile:  $data"
+      continue
+    fi
+    if [ "$OPT_PURGE" = 1 ]; then
+      if [ -n "$(find_pid "$data")" ]; then die "profile '$LABEL' is running; quit it before --purge"; fi
+      safe_to_purge "$data" "$app" || die "refusing to purge '$data': it does not look like a dedicated profile folder"
+      confirm_purge "$data" "$LABEL" || die "cancelled; nothing was deleted"
+    fi
+    if [ "$OS" = macos ]; then
+      rm -rf "$path"
+    else
+      script=$(conf_get "$path" "${KEY_PREFIX}SCRIPT")
+      rm -f "$path"
+      case "$script" in "${XDG_DATA_HOME:-$HOME/.local/share}/$TOOL/"*.sh) rm -f "$script" ;; esac
+    fi
+    echo "removed launcher: $path"
+    if [ "$OPT_PURGE" = 1 ]; then rm -rf "$data"; echo "deleted profile:  $data"; else echo "kept profile:     $data"; fi
+  done < <(list_launchers "$DEST")
+  [ "$found" = 1 ] || die "no launcher with label '$LABEL' in $DEST"
+}
+
+cmd_doctor() {
+  local app
+  echo "$TOOL $VERSION"
+  echo "platform:      $OS ($(uname -m))"
+  echo "launchers in:  $DEST"
+  if app=$(default_app); then
+    echo "detected app:  $app"
+    echo "default data:  $(default_profile_dir "$(app_name "$app")")"
+  else
+    echo "detected app:  none (pass --app PATH to 'add')"
+  fi
+  if [ "$OS" = macos ]; then
+    command -v open >/dev/null && command -v osascript >/dev/null || echo "warning: 'open' or 'osascript' is missing"
+  fi
+}
+
+main() {
+  set -u
+  export LC_ALL=C
+  detect_os
+  local cmd="${1:-help}"
+  [ $# -gt 0 ] && shift
+  case "$cmd" in
+    add | list | launch | remove | doctor) parse_opts "$@"; "cmd_$cmd" ;;
+    -h | --help | help) usage ;;
+    -V | --version | version) echo "$TOOL $VERSION" ;;
+    *) die "unknown command '$cmd' (try --help)" ;;
+  esac
+}
+
+# Run only when executed, so the functions can be sourced by the tests.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
