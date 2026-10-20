@@ -19,7 +19,7 @@ No dependencies and nothing to install: it is one script that uses only tools ma
 | | |
 | --- | --- |
 | **App** | `~/Applications/Claude <label>.app`, a copy of Claude with its own name and icon, so it has its own Dock tile. The copy is an APFS clone and uses almost no extra disk space. |
-| **Icon** | The Claude icon with a coloured badge showing the label's first letter. Use `--icon` for your own, or `--no-badge` to keep Claude's. |
+| **Icon** | The Claude icon with a large coloured badge showing the label's first letter. Use `--color` to turn the whole icon to another colour instead, `--icon` for your own image, or `--no-badge` to keep Claude's. |
 | **App data** | A separate folder, `~/Library/Application Support/Claude-<label>`: login, history, settings. |
 | **Claude Code settings** | A separate `~/.claude-<label>` instead of `~/.claude`, so history, settings and login stay apart. |
 
@@ -43,7 +43,8 @@ Options for `add`:
 | Option | Meaning |
 | --- | --- |
 | `--app PATH` | App to use (default: auto-detected Claude Desktop) |
-| `--icon PATH` | Icon: `.icns`, or an image such as `.png` (square, 1024 px is best) |
+| `--color COLOR` | Turn the whole icon to this colour instead of adding a badge: a name (`red`, `orange`, `yellow`, `green`, `teal`, `blue`, `purple`, `pink`) or a coloured hex such as `#3b82f6`. Only the hue is used, so grey, black and white are refused. |
+| `--icon PATH` | Your own icon: `.icns`, or an image such as `.png` (square, 1024 px is best). Wins over `--color`. |
 | `--no-badge` | Keep the app's own icon |
 | `--data-dir PATH` | App data folder |
 | `--config-dir PATH` | Claude Code folder (default `~/.claude-<label>`) |
@@ -54,6 +55,23 @@ Options for `add`:
 | `--dry-run` | Show what would happen and change nothing |
 
 Labels may contain letters, digits, `-` and `_`.
+
+## Changing the icon later
+
+Run `add` again for the same label. It rebuilds the app and keeps the profile's data, but the profile must be quit first:
+
+```bash
+./claude-profiles add Work --color blue
+```
+
+The icon lives inside the profile's app, at `~/Applications/Claude <label>.app/Contents/Resources/profile.icns`. To swap it by hand, replace that file, then sign the app again and refresh the Dock:
+
+```bash
+codesign --force --deep --sign - "$HOME/Applications/Claude Work.app"
+touch "$HOME/Applications/Claude Work.app" && killall Dock
+```
+
+`update` keeps whatever icon the profile has.
 
 ## Claude Code in a terminal
 

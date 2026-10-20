@@ -96,6 +96,13 @@ expect_ok   "env: empty value accepted" check_env_pair FOO=
 expect_fail "env: missing = rejected" check_env_pair FOO
 expect_fail "env: bad name rejected" check_env_pair "F-O=bar"
 
+equals "$(normalize_color blue)" 3b82f6 && ok "color: names are understood" || bad "color: names are understood"
+equals "$(normalize_color '#FF8800')" ff8800 && ok "color: hex is normalised" || bad "color: hex is normalised"
+expect_fail "color: grey is refused" normalize_color 808080
+expect_fail "color: bad hex is refused" normalize_color zzzzzz
+expect_fail "color: short hex is refused" normalize_color fff
+expect_fail "color: unknown name is refused" normalize_color chartreuse
+
 equals "$(absolute_path /a/b/)" /a/b && ok "absolute_path strips trailing slash" || bad "absolute_path strips trailing slash"
 equals "$(absolute_path /)" / && ok "absolute_path keeps the root" || bad "absolute_path keeps the root"
 expect_fail "absolute_path rejects .." absolute_path /a/../b
@@ -153,6 +160,7 @@ if [ "$OS" = macos ]; then
   has "$WORK/env.out" "^export CLAUDE_CONFIG_DIR=" && ok "env prints export lines" || bad "env prints export lines"
   tool remove Cfg >/dev/null 2>&1
 fi
+expect_fail "an unusable --color is refused" tool add Grey --app "$FAKE" --color grey
 expect_fail "the app's default profile is refused" tool add Main --app "$FAKE" --data-dir "$DEFAULT_DATA"
 expect_fail "bad label is rejected" tool add "bad/label" --app "$FAKE"
 expect_fail "missing app is refused" tool add Work --app "$WORK/nope"
@@ -231,6 +239,33 @@ if [ "${BADGE:-0}" = 1 ] || [ "${LIVE:-0}" = 1 ]; then
     tool add Badge --app "$FAKE" --no-config-dir >/dev/null 2>&1
     [ -s "$(lpath Badge)/Contents/Resources/profile.icns" ] && ok "default icon is the app's icon with a badge" || bad "default icon is the app's icon with a badge"
     tool remove Badge >/dev/null 2>&1
+
+    # The fake app's own icon is grey, which has no hue to turn: --color falls back to a badge.
+    tool add Greyed --app "$FAKE" --color blue --no-config-dir >"$WORK/grey.out" 2>&1
+    [ -s "$(lpath Greyed)/Contents/Resources/profile.icns" ] && has "$WORK/grey.out" "no colour to change" && ok "--color on a grey icon falls back to a badge and says so" || bad "--color on a grey icon falls back to a badge and says so"
+    tool remove Greyed >/dev/null 2>&1
+
+    # Give the fake app a coloured icon, as real apps have.
+    osascript -l JavaScript -e 'ObjC.import("AppKit"); function run(a) { const img = $.NSImage.alloc.initWithSize($.NSMakeSize(1024, 1024)); img.lockFocus; $.NSColor.colorWithSRGBRedGreenBlueAlpha(0.85, 0.45, 0.3, 1).setFill; $.NSBezierPath.fillRect($.NSMakeRect(0, 0, 1024, 1024)); $.NSColor.whiteColor.setFill; $.NSBezierPath.bezierPathWithOvalInRect($.NSMakeRect(312, 312, 400, 400)).fill; img.unlockFocus; $.NSBitmapImageRep.imageRepWithData(img.TIFFRepresentation).representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $.NSDictionary.dictionary).writeToFileAtomically($(a[0]), true); return "ok"; }' "$WORK/color.png" >/dev/null 2>&1
+    mkdir -p "$FAKE/Contents/Resources"
+    make_icns "$WORK/color.png" "$FAKE/Contents/Resources/fake.icns"
+    plist_set "$FAKE/Contents/Info.plist" CFBundleIconFile fake.icns
+    /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$FAKE/Contents/Info.plist" >/dev/null 2>&1
+    touch "$FAKE"
+
+    # Hue (0-359) of the pixel left of the icon's centre, where the tile is plain.
+    hue_of_icns() {
+      sips -s format png "$1" --out "$WORK/hue.png" >/dev/null 2>&1 || return 1
+      osascript -l JavaScript -e 'ObjC.import("AppKit"); function run(a) { const r = $.NSBitmapImageRep.imageRepWithData($.NSData.dataWithContentsOfFile($(a[0]))); const c = r.colorAtXY(Math.round(r.pixelsWide * 0.06), Math.round(r.pixelsHigh / 2)).colorUsingColorSpace($.NSColorSpace.sRGBColorSpace); return String(Math.round(c.hueComponent * 360)); }' "$WORK/hue.png"
+    }
+    tool add Tint --app "$FAKE" --color blue --no-config-dir >/dev/null 2>&1
+    hue=$(hue_of_icns "$(lpath Tint)/Contents/Resources/profile.icns")
+    [ -n "$hue" ] && [ "$hue" -ge 207 ] && [ "$hue" -le 227 ] && ok "--color turns the whole icon to the chosen hue (got $hue, wanted ~217)" || bad "--color turns the whole icon to the chosen hue (got '$hue', wanted ~217)"
+    tool remove Tint >/dev/null 2>&1
+    tool add Tint --app "$FAKE" --color 22c55e --no-config-dir >/dev/null 2>&1
+    hue=$(hue_of_icns "$(lpath Tint)/Contents/Resources/profile.icns")
+    [ -n "$hue" ] && [ "$hue" -ge 132 ] && [ "$hue" -le 152 ] && ok "--color works for another hue (got $hue, wanted ~142)" || bad "--color works for another hue (got '$hue', wanted ~142)"
+    tool remove Tint >/dev/null 2>&1
   fi
 fi
 

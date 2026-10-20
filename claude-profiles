@@ -35,6 +35,9 @@ Options for add:
                       default: auto-detected Claude Desktop
   --icon PATH         icon for the profile: .icns, or an image such as .png
                       default: the app's icon with a coloured badge (macOS)
+  --color COLOR       turn the whole icon to this colour instead of adding a badge:
+                      a name (red, orange, yellow, green, teal, blue, purple, pink)
+                      or a coloured hex such as #3b82f6 (macOS)
   --no-badge          keep the app's own icon
   --data-dir PATH     profile folder (default: <app default folder>-<label>)
   --config-dir PATH   Claude Code config folder (default: ~/.claude-<label>)
@@ -79,6 +82,28 @@ check_env_pair() {
 }
 
 slugify() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '-'; }
+
+# Prints RRGGBB for a colour name or [#]RRGGBB. Only the hue is used, so greys,
+# black and white are refused (use --icon for those).
+normalize_color() {
+  local c r g b max min
+  c=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+  c="${c#\#}"
+  case "$c" in
+    red) c=ef4444 ;; orange) c=f97316 ;; yellow) c=eab308 ;; green) c=22c55e ;;
+    teal) c=14b8a6 ;; blue) c=3b82f6 ;; purple) c=8b5cf6 ;; pink) c=ec4899 ;;
+  esac
+  case "$c" in *[!0-9a-f]*) return 1 ;; esac
+  [ "${#c}" -eq 6 ] || return 1
+  r=$((16#${c:0:2})) g=$((16#${c:2:2})) b=$((16#${c:4:2}))
+  max=$r min=$r
+  [ "$g" -gt "$max" ] && max=$g
+  [ "$b" -gt "$max" ] && max=$b
+  [ "$g" -lt "$min" ] && min=$g
+  [ "$b" -lt "$min" ] && min=$b
+  [ $((max - min)) -ge 24 ] || return 1
+  echo "$c"
+}
 
 conf_get() { sed -n "s/^$2=//p" "$1" | head -n 1; }
 conf_all() { sed -n "s/^$2=//p" "$1"; }
@@ -192,14 +217,41 @@ plist_set() { # file key value
     die "cannot set $2 in $1"
 }
 
-# Draws the app's icon full-bleed (macOS then applies its own rounded mask) and
-# adds a badge with the label's first letter. Arguments: app, output png, label.
+# Draws the app's icon full-bleed (macOS then applies its own rounded mask).
+# With a colour (RRGGBB), turns the whole icon to that hue; without one, adds a
+# badge with the label's first letter.
+# Arguments: app, output png, label, colour or "".
 badge_script() {
   cat <<'EOF'
 ObjC.import('AppKit');
+ObjC.import('CoreImage');
 function run(argv) {
-  const [appPath, outPath, label] = argv;
+  const [appPath, outPath, label, colourHex] = argv;
   const S = 1024;
+
+  function hueOf(color) {
+    return color.colorUsingColorSpace($.NSColorSpace.sRGBColorSpace).hueComponent;
+  }
+  // Rotates the hue of a whole image to the hue of hex. White (the glyph) stays white.
+  function recolour(img, hex) {
+    const target = $.NSColor.colorWithSRGBRedGreenBlueAlpha(
+      parseInt(hex.slice(0, 2), 16) / 255, parseInt(hex.slice(2, 4), 16) / 255, parseInt(hex.slice(4, 6), 16) / 255, 1);
+    const tiff = img.TIFFRepresentation;
+    const probe = (rep) => hueOf(rep.colorAtXY(Math.round(rep.pixelsWide * 0.06), Math.round(rep.pixelsHigh / 2)));
+    const turn = (angle) => {
+      const f = $.CIFilter.filterWithName('CIHueAdjust');
+      f.setValueForKey($.CIImage.alloc.initWithData(tiff), 'inputImage');
+      f.setValueForKey(angle, 'inputAngle');
+      return $.NSBitmapImageRep.alloc.initWithCIImage(f.valueForKey('outputImage'));
+    };
+    const wrap = (x) => x - Math.round(x);
+    const to = hueOf(target);
+    let angle = wrap(to - probe($.NSBitmapImageRep.imageRepWithData(tiff))) * 2 * Math.PI;
+    // The filter is only approximately a hue rotation, so correct once.
+    angle += wrap(to - probe(turn(angle))) * 2 * Math.PI;
+    return turn(angle);
+  }
+
   const base = $.NSWorkspace.sharedWorkspace.iconForFile($(appPath));
 
   // Normalise the icon to 1024 points and measure its opaque tile.
@@ -224,29 +276,41 @@ function run(argv) {
   // Background: a point just inside the tile's left edge, at mid height.
   const bg = rep.colorAtXY(Math.round(minX + (maxX - minX) * 0.08), Math.round((minY + maxY) / 2));
 
-  const out = $.NSImage.alloc.initWithSize($.NSMakeSize(S, S));
-  out.lockFocus;
+  // Full-bleed tile: the app's own background colour with its icon scaled to fill.
+  const tile = $.NSImage.alloc.initWithSize($.NSMakeSize(S, S));
+  tile.lockFocus;
   bg.setFill;
   $.NSBezierPath.fillRect($.NSMakeRect(0, 0, S, S));
   norm.drawInRectFromRectOperationFraction($.NSMakeRect(0, 0, S, S), $.NSMakeRect(bx, by, bw, bh), $.NSCompositingOperationSourceOver, 1.0);
+  tile.unlockFocus;
 
-  let h = 0;
-  for (const c of label) h = (h * 31 + c.charCodeAt(0)) % 360;
-  const fill = $.NSColor.colorWithHueSaturationBrightnessAlpha(h / 360, 0.7, 0.85, 1);
-  const d = 320, m = 96, ring = 14;
-  $.NSColor.whiteColor.setFill;
-  $.NSBezierPath.bezierPathWithOvalInRect($.NSMakeRect(S - d - m - ring, m - ring, d + 2 * ring, d + 2 * ring)).fill;
-  fill.setFill;
-  $.NSBezierPath.bezierPathWithOvalInRect($.NSMakeRect(S - d - m, m, d, d)).fill;
-  const attrs = $.NSMutableDictionary.alloc.init;
-  attrs.setObjectForKey($.NSFont.boldSystemFontOfSize(220), $.NSFontAttributeName);
-  attrs.setObjectForKey($.NSColor.whiteColor, $.NSForegroundColorAttributeName);
-  const letter = $(label.charAt(0).toUpperCase());
-  const sz = letter.sizeWithAttributes(attrs);
-  letter.drawAtPointWithAttributes($.NSMakePoint(S - d - m + (d - sz.width) / 2, m + (d - sz.height) / 2), attrs);
-  out.unlockFocus;
-
-  const orep = $.NSBitmapImageRep.imageRepWithData(out.TIFFRepresentation);
+  let orep;
+  if (colourHex) {
+    if (bg.colorUsingColorSpace($.NSColorSpace.sRGBColorSpace).saturationComponent < 0.15) throw new Error('grey icon');
+    orep = recolour(tile, colourHex);
+  } else {
+    const out = $.NSImage.alloc.initWithSize($.NSMakeSize(S, S));
+    out.lockFocus;
+    tile.drawInRectFromRectOperationFraction($.NSMakeRect(0, 0, S, S), $.NSZeroRect, $.NSCompositingOperationSourceOver, 1.0);
+    let h = 0;
+    for (const c of label) h = (h * 31 + c.charCodeAt(0)) % 360;
+    const fill = $.NSColor.colorWithHueSaturationBrightnessAlpha(h / 360, 0.7, 0.85, 1);
+    // A big circle in the bottom-right, kept clear of the rounded corner so the
+    // system's icon mask does not cut it.
+    const d = 440, ring = 14, cx = 780, cy = 250;
+    $.NSColor.whiteColor.setFill;
+    $.NSBezierPath.bezierPathWithOvalInRect($.NSMakeRect(cx - d / 2 - ring, cy - d / 2 - ring, d + 2 * ring, d + 2 * ring)).fill;
+    fill.setFill;
+    $.NSBezierPath.bezierPathWithOvalInRect($.NSMakeRect(cx - d / 2, cy - d / 2, d, d)).fill;
+    const attrs = $.NSMutableDictionary.alloc.init;
+    attrs.setObjectForKey($.NSFont.boldSystemFontOfSize(330), $.NSFontAttributeName);
+    attrs.setObjectForKey($.NSColor.whiteColor, $.NSForegroundColorAttributeName);
+    const letter = $(label.charAt(0).toUpperCase());
+    const sz = letter.sizeWithAttributes(attrs);
+    letter.drawAtPointWithAttributes($.NSMakePoint(cx - sz.width / 2, cy - sz.height / 2), attrs);
+    out.unlockFocus;
+    orep = $.NSBitmapImageRep.imageRepWithData(out.TIFFRepresentation);
+  }
   orep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $.NSDictionary.dictionary).writeToFileAtomically($(outPath), true);
   return 'ok';
 }
@@ -271,10 +335,10 @@ make_icns() {
   return "$rc"
 }
 
-badge_icns() { # app out label
+badge_icns() { # app out label [colour]
   local tmp rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/$TOOL.XXXXXX") || return 1
-  osascript -l JavaScript -e "$(badge_script)" "$1" "$tmp/badge.png" "$3" >/dev/null 2>&1 &&
+  osascript -l JavaScript -e "$(badge_script)" "$1" "$tmp/badge.png" "$3" "${4:-}" >/dev/null 2>&1 &&
     [ -f "$tmp/badge.png" ] && make_icns "$tmp/badge.png" "$2"
   rc=$?
   rm -rf "$tmp"
@@ -319,8 +383,8 @@ check_ours() { # path marker-file
 }
 
 # A copy of the app with its own name, icon, data folder and environment.
-make_macos_copy() { # name label app data_dir dest icon no_badge env_lines
-  local name="$1" label="$2" app="$3" data_dir="$4" dest="$5" icon="$6" no_badge="$7" env_lines="$8"
+make_macos_copy() { # name label app data_dir dest icon no_badge env_lines color
+  local name="$1" label="$2" app="$3" data_dir="$4" dest="$5" icon="$6" no_badge="$7" env_lines="$8" color="${9:-}"
   local bundle="$dest/$name.app" tmp="$dest/.$name.app.partial" info exe line icns
   info="$tmp/Contents/Info.plist"
   icns="$tmp/Contents/Resources/profile.icns"
@@ -345,8 +409,14 @@ make_macos_copy() { # name label app data_dir dest icon no_badge env_lines
 
   if [ -n "$icon" ]; then
     make_icns "$icon" "$icns" || { rm -rf "$tmp"; die "could not use '$icon' as an icon"; }
-  elif [ "$no_badge" != 1 ]; then
-    badge_icns "$app" "$icns" "$label" || warn "could not draw a badge (needs a desktop session); keeping the app's own icon"
+  elif [ "$no_badge" != 1 ] || [ -n "$color" ]; then
+    if ! badge_icns "$app" "$icns" "$label" "$color"; then
+      if [ -n "$color" ] && badge_icns "$app" "$icns" "$label" ""; then
+        warn "the app's icon has no colour to change; added a badge instead"
+      else
+        warn "could not draw the icon (needs a desktop session); keeping the app's own icon"
+      fi
+    fi
   fi
   if [ -f "$icns" ]; then
     plist_set "$info" CFBundleIconFile profile.icns
@@ -468,7 +538,7 @@ find_launcher() { # dest label -> the matching list_launchers line
 # --- commands ---------------------------------------------------------------
 
 parse_opts() {
-  OPT_APP="" OPT_DATA_DIR="" OPT_DEST="" OPT_ICON="" OPT_CONFIG_DIR="" OPT_ENV=""
+  OPT_APP="" OPT_DATA_DIR="" OPT_DEST="" OPT_ICON="" OPT_COLOR="" OPT_CONFIG_DIR="" OPT_ENV=""
   OPT_NO_BADGE=0 OPT_NO_CONFIG=0 OPT_SHARED=0 OPT_DRY=0 OPT_PURGE=0 OPT_YES=0 LABEL=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -477,6 +547,9 @@ parse_opts() {
       --dest)       [ $# -ge 2 ] || die "--dest needs a value";       OPT_DEST="$2"; shift 2 ;;
       --icon)       [ $# -ge 2 ] || die "--icon needs a value";       OPT_ICON="$2"; shift 2 ;;
       --config-dir) [ $# -ge 2 ] || die "--config-dir needs a value"; OPT_CONFIG_DIR="$2"; shift 2 ;;
+      --color)      [ $# -ge 2 ] || die "--color needs a value"
+                    OPT_COLOR=$(normalize_color "$2") || die "invalid --color '$2': use a name (red, orange, yellow, green, teal, blue, purple, pink) or a coloured hex such as #3b82f6"
+                    shift 2 ;;
       --env)        [ $# -ge 2 ] || die "--env needs a value"; check_env_pair "$2"; OPT_ENV="$OPT_ENV$2"$'\n'; shift 2 ;;
       --no-badge)      OPT_NO_BADGE=1; shift ;;
       --no-config-dir) OPT_NO_CONFIG=1; shift ;;
@@ -513,6 +586,8 @@ cmd_add() {
 
   if [ "$OS" = macos ] && [ "$OPT_SHARED" != 1 ]; then mode=copy; else mode=shared; fi
   if [ "$OPT_SHARED" = 1 ] && [ "$OS" != macos ]; then warn "--shared-app has no effect on this platform"; fi
+  if [ -n "$OPT_COLOR" ] && [ "$mode" != copy ]; then warn "--color only applies to app copies; ignoring it"; fi
+  if [ -n "$OPT_COLOR" ] && [ -n "$OPT_ICON" ]; then warn "--icon wins over --color"; fi
 
   if [ -n "$OPT_DATA_DIR" ]; then
     data_dir=$(absolute_path "$OPT_DATA_DIR") || exit 1
@@ -542,6 +617,7 @@ cmd_add() {
     fi
     echo "  app:      $app"
     echo "  profile:  $data_dir"
+    [ -z "$OPT_COLOR" ] || echo "  colour:   #$OPT_COLOR"
     [ -z "$env_lines" ] || printf '%s' "$env_lines" | sed 's/^/  env:      /'
     return 0
   fi
@@ -549,7 +625,7 @@ cmd_add() {
   mkdir -p "$DEST" || die "cannot create $DEST"
   local created
   if [ "$mode" = copy ]; then
-    created=$(make_macos_copy "$launcher_name" "$LABEL" "$app" "$data_dir" "$DEST" "$OPT_ICON" "$OPT_NO_BADGE" "$env_lines") || exit 1
+    created=$(make_macos_copy "$launcher_name" "$LABEL" "$app" "$data_dir" "$DEST" "$OPT_ICON" "$OPT_NO_BADGE" "$env_lines" "$OPT_COLOR") || exit 1
   elif [ "$OS" = macos ]; then
     created=$(make_macos_launcher "$launcher_name" "$LABEL" "$app" "$data_dir" "$DEST" "$OPT_ICON" "$env_lines") || exit 1
   else
