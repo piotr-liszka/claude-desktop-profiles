@@ -154,7 +154,7 @@ tool remove Iconic >/dev/null 2>&1
 echo "== config folder (macOS, app named Claude)"
 if [ "$OS" = macos ]; then
   tool add Cfg --app "$FAKE" --no-badge >"$WORK/cfg.out" 2>&1
-  has "$(lpath Cfg)/Contents/MacOS/profile-launch" "CLAUDE_CONFIG_DIR=$HOME/.claude-Cfg" && ok "default config folder is ~/.claude-<label>" || bad "default config folder is ~/.claude-<label>"
+  has "$(lpath Cfg)/Contents/MacOS/profile-launch" "CLAUDE_CONFIG_DIR=$HOME/.claude-cfg" && ok "default config folder is ~/.claude-<label in lowercase>" || bad "default config folder is ~/.claude-<label in lowercase>"
   expect_fail "~/.claude itself is refused" tool add Bad --app "$FAKE" --config-dir "$HOME/.claude"
   tool env Cfg >"$WORK/env.out" 2>&1
   has "$WORK/env.out" "^export CLAUDE_CONFIG_DIR=" && ok "env prints export lines" || bad "env prints export lines"

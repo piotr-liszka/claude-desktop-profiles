@@ -21,7 +21,7 @@ No dependencies and nothing to install: it is one script that uses only tools ma
 | **App** | `~/Applications/Claude <label>.app`, a copy of Claude with its own name and icon, so it has its own Dock tile. The copy is an APFS clone and uses almost no extra disk space. |
 | **Icon** | The Claude icon with a large coloured badge showing the label's first letter. Use `--color` to turn the whole icon to another colour instead, `--icon` for your own image, or `--no-badge` to keep Claude's. |
 | **App data** | A separate folder, `~/Library/Application Support/Claude-<label>`: login, history, settings. |
-| **Claude Code settings** | A separate `~/.claude-<label>` instead of `~/.claude`, so history, settings and login stay apart. |
+| **Claude Code settings** | A separate `~/.claude-<label>` (label in lowercase, e.g. `~/.claude-work`) instead of `~/.claude`, so history, settings and login stay apart. |
 
 The installed Claude is never modified.
 
@@ -47,7 +47,7 @@ Options for `add`:
 | `--icon PATH` | Your own icon: `.icns`, or an image such as `.png` (square, 1024 px is best). Wins over `--color`. |
 | `--no-badge` | Keep the app's own icon |
 | `--data-dir PATH` | App data folder |
-| `--config-dir PATH` | Claude Code folder (default `~/.claude-<label>`) |
+| `--config-dir PATH` | Claude Code folder (default `~/.claude-<label in lowercase>`) |
 | `--no-config-dir` | Do not give the profile its own Claude Code folder |
 | `--env NAME=VALUE` | Extra environment variable for the app (repeatable) |
 | `--shared-app` | Do not copy the app; start the installed one through a launcher (all profiles then share one Dock tile) |
@@ -75,7 +75,7 @@ touch "$HOME/Applications/Claude Work.app" && killall Dock
 
 ## Claude Code in a terminal
 
-The profile's app uses `~/.claude-<label>`. To use the same settings and login from a terminal:
+The profile's app uses `~/.claude-<label in lowercase>`. To use the same settings and login from a terminal:
 
 ```bash
 eval "$(./claude-profiles env Work)"

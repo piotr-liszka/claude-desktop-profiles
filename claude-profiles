@@ -40,7 +40,7 @@ Options for add:
                       or a coloured hex such as #3b82f6 (macOS)
   --no-badge          keep the app's own icon
   --data-dir PATH     profile folder (default: <app default folder>-<label>)
-  --config-dir PATH   Claude Code config folder (default: ~/.claude-<label>)
+  --config-dir PATH   Claude Code config folder (default: ~/.claude-<label in lowercase>)
   --no-config-dir     do not give the profile its own Claude Code config folder
   --env NAME=VALUE    extra environment variable for the app (repeatable)
   --shared-app        macOS: do not copy the app; start the installed app through
@@ -603,7 +603,7 @@ cmd_add() {
   # profile its own folder so the accounts stay apart.
   env_lines="$OPT_ENV"
   if [ "$OPT_NO_CONFIG" != 1 ] && { [ -n "$OPT_CONFIG_DIR" ] || [ "$name" = "$DEFAULT_APP_NAME" ]; }; then
-    if [ -n "$OPT_CONFIG_DIR" ]; then config_dir=$(absolute_path "$OPT_CONFIG_DIR") || exit 1; else config_dir="$HOME/.claude-$LABEL"; fi
+    if [ -n "$OPT_CONFIG_DIR" ]; then config_dir=$(absolute_path "$OPT_CONFIG_DIR") || exit 1; else config_dir="$HOME/.claude-$(printf '%s' "$LABEL" | tr 'A-Z' 'a-z')"; fi
     case "$config_dir" in *$'\n'*) die "config dir must not contain a newline" ;; esac
     [ "$config_dir" != "$HOME/.claude" ] || die "'$config_dir' is Claude Code's default config folder; choose another --config-dir"
     env_lines="CLAUDE_CONFIG_DIR=$config_dir"$'\n'"$env_lines"
