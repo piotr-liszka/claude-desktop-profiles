@@ -25,7 +25,8 @@ Usage:
   $TOOL add <label> [options]      create a profile: its own app, icon, data and settings
   $TOOL list                       show profiles and whether they are running
   $TOOL launch <label>             start a profile, or bring it to the front
-  $TOOL update [label]             rebuild app copies from the installed app (run after an app update)
+  $TOOL update [label]             rebuild app copies from the installed app (all, or one label)
+  $TOOL install-updater            macOS: create an app that runs 'update --outdated --restart' for you
   $TOOL env <label>                print export lines so a terminal can use the profile's settings
   $TOOL remove <label> [--purge]   delete the profile's app (and optionally its data)
   $TOOL doctor                     show what was detected on this machine
@@ -48,6 +49,10 @@ Options for add:
   --dest DIR          where profiles are created
                       default: ~/Applications (macOS), ~/.local/share/applications (Linux)
   --dry-run           print what would happen without changing anything
+
+Options for update:
+  --outdated          only rebuild copies whose version differs from the installed app
+  --restart           quit open profiles first and reopen them when rebuilt
 
 Other options: --purge and -y/--yes (with remove).
 Labels may contain letters, digits, '-' and '_'.
@@ -539,7 +544,7 @@ find_launcher() { # dest label -> the matching list_launchers line
 
 parse_opts() {
   OPT_APP="" OPT_DATA_DIR="" OPT_DEST="" OPT_ICON="" OPT_COLOR="" OPT_CONFIG_DIR="" OPT_ENV=""
-  OPT_NO_BADGE=0 OPT_NO_CONFIG=0 OPT_SHARED=0 OPT_DRY=0 OPT_PURGE=0 OPT_YES=0 LABEL=""
+  OPT_NO_BADGE=0 OPT_NO_CONFIG=0 OPT_SHARED=0 OPT_DRY=0 OPT_PURGE=0 OPT_YES=0 OPT_OUTDATED=0 OPT_RESTART=0 LABEL=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --app)        [ $# -ge 2 ] || die "--app needs a value";        OPT_APP="$2"; shift 2 ;;
@@ -555,6 +560,8 @@ parse_opts() {
       --no-config-dir) OPT_NO_CONFIG=1; shift ;;
       --shared-app)    OPT_SHARED=1; shift ;;
       --purge)         OPT_PURGE=1; shift ;;
+      --outdated)      OPT_OUTDATED=1; shift ;;
+      --restart)       OPT_RESTART=1; shift ;;
       -y | --yes)      OPT_YES=1; shift ;;
       --dry-run)       OPT_DRY=1; shift ;;
       -h | --help)     usage; exit 0 ;;
@@ -675,9 +682,36 @@ cmd_launch() {
   fi
 }
 
+app_version() { # bundle
+  printf '%s (%s)' "$(plist_get "$1/Contents/Info.plist" CFBundleShortVersionString)" "$(plist_get "$1/Contents/Info.plist" CFBundleVersion)"
+}
+
+# True when this script runs inside the process PID (e.g. a terminal in that app).
+runs_inside() { # pid
+  local p=$$
+  while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+    [ "$p" = "$1" ] && return 0
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+  done
+  return 1
+}
+
+# Asks a profile to quit as its Quit menu would. If it is still open after
+# QUIT_WAIT seconds (it may be asking whether to quit), sends SIGTERM and waits again.
+quit_profile() { # data_dir
+  local pid i wait=$((${QUIT_WAIT:-20} * 4))
+  pid=$(find_pid "$1")
+  [ -n "$pid" ] || return 0
+  osascript -l JavaScript -e 'ObjC.import("AppKit"); $.NSRunningApplication.runningApplicationWithProcessIdentifier('"$pid"').terminate' >/dev/null 2>&1
+  for i in $(seq 1 "$wait"); do [ -z "$(find_pid "$1")" ] && return 0; sleep 0.25; done
+  kill -TERM "$pid" 2>/dev/null
+  for i in $(seq 1 "$wait"); do [ -z "$(find_pid "$1")" ] && return 0; sleep 0.25; done
+  return 1
+}
+
 cmd_update() {
   [ "$OS" = macos ] || die "update only applies to app copies, which are macOS-only"
-  local line label path app data conf mode name dest icon env_lines tmp found=0
+  local line label path app data conf mode name dest icon env_lines tmp pid have want rc found=0
   while IFS= read -r line; do
     IFS=$'\t' read -r label path app data <<<"$line"
     [ -z "$LABEL" ] || [ "$label" = "$LABEL" ] || continue
@@ -688,17 +722,115 @@ cmd_update() {
     dest=$(dirname "$path")
     env_lines=$(conf_all "$conf" ENV)
     [ -d "$app" ] || die "'$app' (needed for '$label') no longer exists"
-    if [ "$OPT_DRY" = 1 ]; then echo "would rebuild: $path"; continue; fi
+    have=$(app_version "$path") want=$(app_version "$app")
+    if [ "$OPT_OUTDATED" = 1 ] && [ "$have" = "$want" ]; then echo "up to date: $path"; continue; fi
+    pid=""
+    [ "$OPT_RESTART" = 1 ] && pid=$(find_pid "$data")
+    if [ "$OPT_DRY" = 1 ]; then echo "would rebuild: $path ($have -> $want)${pid:+, quits and reopens it}"; continue; fi
+    if [ -n "$pid" ]; then
+      runs_inside "$pid" && die "this command runs inside '$label', so it cannot quit it; run it from Terminal or the updater app"
+      quit_profile "$data" || die "profile '$label' did not quit; quit it yourself and try again"
+    fi
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/$TOOL.XXXXXX") || die "cannot create a temporary folder"
     icon=""
     if [ -f "$path/Contents/Resources/profile.icns" ]; then
       cp "$path/Contents/Resources/profile.icns" "$tmp/profile.icns" && icon="$tmp/profile.icns"
     fi
-    make_macos_copy "$name" "$label" "$app" "$data" "$dest" "$icon" 1 "$env_lines" >/dev/null || { rm -rf "$tmp"; exit 1; }
+    # A subshell, so a failed rebuild still reopens the old copy (it stays in place).
+    ( make_macos_copy "$name" "$label" "$app" "$data" "$dest" "$icon" 1 "$env_lines" >/dev/null )
+    rc=$?
     rm -rf "$tmp"
-    echo "updated: $path"
+    [ -z "$pid" ] || open "$path" || warn "could not reopen '$path'"
+    [ "$rc" = 0 ] || exit 1
+    echo "updated: $path${pid:+ (reopened)}"
   done < <(list_launchers "$DEST")
   [ "$found" = 1 ] || die "no app copies to update${LABEL:+ for '$LABEL'} in $DEST"
+}
+
+# The updater's entry point: asks, then runs 'update --outdated --restart'.
+write_updater_script() { # path dest title
+  {
+    echo '#!/bin/bash'
+    echo "# Generated by $TOOL $VERSION. Rebuilds profile apps that are older than the installed app."
+    echo 'here="$(cd "$(dirname "$0")" && pwd)"'
+    printf 'tool="$here/../Resources/%s"\n' "$TOOL"
+    printf 'dest=%q\n' "$2"
+    printf 'title=%q\n' "$3"
+    cat <<'EOF'
+log="$HOME/Library/Logs/claude-profiles-updater.log"
+dialog() { # message buttons...
+  local msg="$1" b
+  shift
+  b=$(printf '"%s", ' "$@")
+  osascript -e 'on run a' -e 'activate' \
+    -e "display dialog (item 1 of a) with title (item 2 of a) buttons {${b%, }} default button \"${!#}\"" \
+    -e 'end run' "$msg" "$title" >/dev/null 2>&1
+}
+names() { sed -e 's|^[a-z ]*: ||' -e 's|\.app.*$||' -e 's|^.*/||'; }
+
+plan=$("$tool" update --outdated --restart --dry-run --dest "$dest" 2>&1) || { dialog "Could not check the profiles:"$'\n\n'"$plan" OK; exit 1; }
+todo=$(printf '%s\n' "$plan" | grep '^would rebuild: ')
+if [ -z "$todo" ]; then dialog "All profiles are up to date." OK; exit 0; fi
+msg="These profiles are older than the installed app and will be rebuilt:"$'\n\n'"$(printf '%s\n' "$todo" | names)"
+printf '%s\n' "$todo" | grep -q 'quits and reopens' && msg="$msg"$'\n\n'"Open profiles will be quit and reopened."
+dialog "$msg" Cancel Update || exit 0
+osascript -e 'on run a' -e 'display notification "Rebuilding profiles..." with title (item 1 of a)' -e 'end run' "$title" >/dev/null 2>&1
+out=$("$tool" update --outdated --restart --dest "$dest" 2>&1)
+rc=$?
+{ echo "== $(date)"; printf '%s\n' "$out"; } >> "$log"
+if [ "$rc" = 0 ]; then
+  dialog "Updated:"$'\n\n'"$(printf '%s\n' "$out" | grep '^updated: ' | names)" OK
+else
+  dialog "The update stopped:"$'\n\n'"$(printf '%s\n' "$out" | tail -n 5)"$'\n\n'"Log: $log" OK
+  exit 1
+fi
+EOF
+  } > "$1" && chmod +x "$1" || die "cannot write $1"
+}
+
+# A small app that rebuilds outdated profiles, so no terminal is needed.
+cmd_install_updater() {
+  [ "$OS" = macos ] || die "the updater app is macOS-only"
+  [ -z "$LABEL" ] || die "unexpected argument '$LABEL'"
+  local app name bundle tmp self
+  app="$OPT_APP"
+  if [ -z "$app" ]; then app=$(default_app) || die "could not find $DEFAULT_APP_NAME; pass --app PATH"; fi
+  app=$(absolute_path "$app") || exit 1
+  name="$(app_name "$app") Profiles Updater"
+  bundle="$DEST/$name.app" tmp="$DEST/.$name.app.partial"
+  self=$(absolute_path "${BASH_SOURCE[0]}") || exit 1
+  check_ours "$bundle" "$bundle/Contents/Resources/updater.conf"
+  if [ "$OPT_DRY" = 1 ]; then echo "would create: $bundle"; return 0; fi
+
+  mkdir -p "$DEST" || die "cannot create $DEST"
+  rm -rf "$tmp"
+  mkdir -p "$tmp/Contents/MacOS" "$tmp/Contents/Resources" || die "cannot create $tmp"
+  # A copy of this script, so the app keeps working if the repository moves.
+  cp "$self" "$tmp/Contents/Resources/$TOOL" && chmod +x "$tmp/Contents/Resources/$TOOL" || { rm -rf "$tmp"; die "cannot copy $self"; }
+  write_updater_script "$tmp/Contents/MacOS/run" "$DEST" "$name"
+  badge_icns "$app" "$tmp/Contents/Resources/icon.icns" "Update" "" || warn "could not draw the icon (needs a desktop session)"
+  cat > "$tmp/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>$(printf '%s' "$name" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')</string>
+  <key>CFBundleIdentifier</key><string>local.$TOOL.updater</string>
+  <key>CFBundleExecutable</key><string>run</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>CFBundleIconFile</key><string>icon</string>
+  <key>LSUIElement</key><true/>
+</dict>
+</plist>
+EOF
+  echo "CREATED_BY=$TOOL $VERSION" > "$tmp/Contents/Resources/updater.conf"
+  codesign --force --deep --sign - "$tmp" >/dev/null 2>&1 || { rm -rf "$tmp"; die "could not sign the updater"; }
+  rm -rf "$bundle"
+  mv "$tmp" "$bundle" || die "could not move the updater into place"
+  touch "$bundle"
+  echo "Created: $bundle"
+  echo "Open it after $(app_name "$app") updates. It rebuilds outdated profiles and reopens the ones that were open."
 }
 
 cmd_env() {
@@ -805,6 +937,7 @@ main() {
   [ $# -gt 0 ] && shift
   case "$cmd" in
     add | list | launch | update | env | remove | doctor) parse_opts "$@"; "cmd_$cmd" ;;
+    install-updater) parse_opts "$@"; cmd_install_updater ;;
     -h | --help | help) usage ;;
     -V | --version | version) echo "$TOOL $VERSION" ;;
     *) die "unknown command '$cmd' (try --help)" ;;

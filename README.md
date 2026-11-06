@@ -32,7 +32,8 @@ The installed Claude is never modified.
 | `add <label>` | Create a profile |
 | `list` | Show profiles and whether each is running |
 | `launch <label>` | Start a profile, or bring it to the front |
-| `update [label]` | Rebuild app copies from the installed Claude (run this after Claude updates) |
+| `update [label]` | Rebuild app copies from the installed Claude (run this after Claude updates). Without a label it rebuilds every profile. `--outdated` skips copies already at the installed version; `--restart` quits open profiles first and reopens them. |
+| `install-updater` | macOS: create `~/Applications/Claude Profiles Updater.app`, which does the update for you (see below) |
 | `env <label>` | Print `export` lines so a terminal can use the profile's settings |
 | `remove <label>` | Delete the profile's app and keep its data |
 | `remove <label> --purge` | Also delete its data and Claude Code folders (asks you to type the label) |
@@ -73,6 +74,20 @@ touch "$HOME/Applications/Claude Work.app" && killall Dock
 
 `update` keeps whatever icon the profile has.
 
+## Updating after Claude updates
+
+Profile copies do not update themselves. Let the original Claude install its update, then open **Claude Profiles Updater**. It lists the profiles that are older than the installed Claude, asks before it starts, quits the open ones, rebuilds them and reopens them.
+
+Create it once:
+
+```bash
+./claude-profiles install-updater
+```
+
+It carries its own copy of the script, so run `install-updater` again after you change the script. Its log is `~/Library/Logs/claude-profiles-updater.log`.
+
+Without the app, run `./claude-profiles update --outdated --restart` from Terminal. A profile cannot quit itself, so this refuses to run from a terminal inside a profile it would quit.
+
 ## Claude Code in a terminal
 
 The profile's app uses `~/.claude-<label in lowercase>`. To use the same settings and login from a terminal:
@@ -100,7 +115,7 @@ The script is not tied to Claude. It works with any app that honors the Chromium
 
 ## Good to know
 
-- **Updates.** Copies do not auto-update, because they are no longer signed by Anthropic. After Claude updates, run `./claude-profiles update` to rebuild them. Quit the profile first.
+- **Updates.** Copies do not auto-update, because they are no longer signed by Anthropic. If a profile offers to install an update, close the message: let only the original Claude update, then use the updater app or `update --restart` (see above).
 - **Signing.** Editing the copy breaks its signature, so it is signed ad hoc on your machine. macOS may ask once for Keychain access, and permissions such as camera or screen recording are granted per copy. Features that rely on Anthropic's signature (passkeys, security keys, Microsoft single sign-on) may not work in a copy. If you need them, create that profile with `--shared-app`.
 - **Sign-in.** Sign-in returns to the app through a link that macOS delivers to one app. If it opens the wrong window, quit the other profile while you sign in, then start it again.
 - **Disk space.** Each profile keeps its own data, including anything large the app downloads for itself.

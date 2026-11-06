@@ -196,6 +196,27 @@ if [ "$OS" = macos ]; then
   [ -s "$(lpath Pic)/Contents/Resources/profile.icns" ] && ok "update keeps the custom icon" || bad "update keeps the custom icon"
   tool remove Pic >/dev/null 2>&1
   expect_fail "update of an unknown label fails" tool update Nope
+
+  plist_set "$FAKE/Contents/Info.plist" CFBundleShortVersionString 1.0
+  tool update Work >/dev/null 2>&1
+  tool update Work --outdated 2>&1 | grep -q "^up to date: " && ok "--outdated skips a copy at the installed version" || bad "--outdated skips a copy at the installed version"
+  plist_set "$FAKE/Contents/Info.plist" CFBundleShortVersionString 2.0
+  tool update Work --outdated --dry-run 2>&1 | grep -q "^would rebuild: .*1.0.*-> 2.0" && ok "--outdated --dry-run shows the version change" || bad "--outdated --dry-run shows the version change"
+  tool update Work --outdated 2>&1 | grep -q "^updated: " && ok "--outdated rebuilds an older copy" || bad "--outdated rebuilds an older copy"
+  equals "$(plist_get "$(lpath Work)/Contents/Info.plist" CFBundleShortVersionString)" 2.0 && ok "the rebuilt copy has the new version" || bad "the rebuilt copy has the new version"
+
+  echo "== install-updater"
+  U="$DEST/Claude Profiles Updater.app"
+  expect_ok "install-updater creates the app" tool install-updater --app "$FAKE"
+  [ -x "$U/Contents/MacOS/run" ] && [ -x "$U/Contents/Resources/claude-profiles" ] && ok "the updater has its entry point and its own copy of the tool" || bad "the updater has its entry point and its own copy of the tool"
+  bash -n "$U/Contents/MacOS/run" && ok "the updater's entry point is valid bash" || bad "the updater's entry point is valid bash"
+  has "$U/Contents/MacOS/run" "update --outdated --restart" && ok "the updater runs update --outdated --restart" || bad "the updater runs update --outdated --restart"
+  expect_ok "the updater is validly signed" codesign --verify --deep --strict "$U"
+  expect_ok "install-updater can run again" tool install-updater --app "$FAKE"
+  tool list | grep -q "Updater" && bad "list ignores the updater" || ok "list ignores the updater"
+  rm -rf "$U"; mkdir -p "$U"
+  expect_fail "install-updater refuses to overwrite an app it did not create" tool install-updater --app "$FAKE"
+  rm -rf "$U"
 else
   expect_fail "update is macOS-only" tool update Work
 fi
@@ -287,6 +308,12 @@ if [ "${LIVE:-0}" = 1 ]; then
   equals "$(count Live)" 1 && ok "a second launch does not start a duplicate" || bad "a second launch does not start a duplicate"
   expect_fail "remove refuses a running profile" tool remove Live
   expect_fail "update refuses a running profile" tool update Live
+  if [ "$OS" = macos ]; then
+    QUIT_WAIT=1 tool update Live --restart >"$WORK/restart.out" 2>&1
+    has "$WORK/restart.out" "updated: .*(reopened)" && ok "update --restart quits, rebuilds and reopens" || bad "update --restart quits, rebuilds and reopens"
+    pid2=$(wait_for_pid "$(dpath Live)")
+    [ -n "$pid2" ] && [ "$pid2" != "$pid" ] && ok "the profile is running again after --restart" || bad "the profile is running again after --restart"
+  fi
   pkill -f -- "$(PATTERN Live)"; sleep 1
   tool remove Live >/dev/null 2>&1
 

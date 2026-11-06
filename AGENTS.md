@@ -21,6 +21,8 @@ A small, dependency-free tool that gives each account of an Electron desktop app
 - **`CFBundleName` must not change.** Electron derives the names of its helper apps from it; changing it makes the app crash with "Unable to find helper app".
 - Restricted entitlements (keychain access groups, application identifier) cannot survive an ad-hoc signature, so the copy is signed without entitlements. Say so wherever features could be affected.
 - The icon is drawn by a JXA script embedded in `badge_script` (AppKit and CoreImage, so it needs a desktop session). It scales the app's own icon to a full-bleed square so macOS applies its rounded mask cleanly, then either adds a badge (kept clear of the rounded corner) or rotates the hue of the whole image with `CIHueAdjust` for `--color`. A grey base icon has no hue to rotate, so `--color` falls back to the badge.
+- `update --restart` quits a profile through `NSRunningApplication.terminate` (like its Quit menu), falls back to SIGTERM, rebuilds, then reopens it. It refuses when it runs inside the profile it would quit (`runs_inside`).
+- `install-updater` builds `<App> Profiles Updater.app`: a bash entry point (`write_updater_script`) plus a copy of this script, asking through `osascript` dialogs. It is marked with `updater.conf`, not `profile.conf`, so it is never listed as a profile.
 - `--shared-app` and Linux use a launcher instead. The launcher functions (`match_main_pid`, `find_pid`, `activate_pid`, `launch_profile`) are copied into each generated script with `declare -f`, so they may use only system tools and no globals.
 
 ## Rules
