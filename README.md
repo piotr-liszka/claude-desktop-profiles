@@ -1,6 +1,20 @@
+<div align="center">
+
 # claude-desktop-profiles
 
-Run more than one Claude Desktop account on the same computer, for example a personal and a work account, each signed in at the same time. On macOS every profile is its own app, with its own Dock icon and name, its own data and its own Claude Code settings.
+Run several Claude Desktop accounts side by side, for example personal and work, each signed in.
+On macOS every profile is its own app, with its own Dock icon, data and Claude Code settings.
+
+[Quick start](#quick-start) · [Menu bar app](#menu-bar-app) · [Usage](docs/usage.md)
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/menubar-profiles.png" alt="The menu bar app listing two running profiles, Claude Personal and Claude Work" /></td>
+    <td width="50%"><img src="docs/images/menubar-new-profile.png" alt="The New profile form: a label, icon choices Badge, Colour, Image and Original, and an Advanced section" /></td>
+  </tr>
+</table>
+
+</div>
 
 ## Quick start
 
@@ -10,172 +24,47 @@ cd claude-desktop-profiles
 ./claude-profiles add Work
 ```
 
-Open `~/Applications/Claude Work.app`, sign in to the account you want in that profile, and pin it to your Dock if you like. Your existing Claude stays as it is, with its current account.
+Open `~/Applications/Claude Work.app` and sign in. Your existing Claude stays as it is.
 
-No dependencies and nothing to install: it is one script that uses only tools macOS already has. Read it before you run it.
+It is one script with no dependencies, using only tools macOS already has. Read it before you run it.
 
-Prefer clicking to typing? The [menu bar app](#menu-bar-app-macos) does the same from the macOS menu bar.
-
-## What each profile gets (macOS)
+## What a profile gets
 
 | | |
 | --- | --- |
-| **App** | `~/Applications/Claude <label>.app`, a copy of Claude with its own name and icon, so it has its own Dock tile. The copy is an APFS clone and uses almost no extra disk space. |
-| **Icon** | The Claude icon with a large coloured badge showing the label's first letter. Use `--color` to turn the whole icon to another colour instead, `--icon` for your own image, or `--no-badge` to keep Claude's. |
-| **App data** | A separate folder, `~/Library/Application Support/Claude-<label>`: login, history, settings. |
-| **Claude Code settings** | A separate `~/.claude-<label>` (label in lowercase, e.g. `~/.claude-work`) instead of `~/.claude`, so history, settings and login stay apart. |
+| **App** | `~/Applications/Claude <label>.app`: a copy of Claude (an APFS clone, almost no disk space) with its own name and Dock icon |
+| **Icon** | Claude's icon with a coloured badge, a whole new colour, or your own image |
+| **Data** | `~/Library/Application Support/Claude-<label>`: login, history, settings |
+| **Claude Code** | `~/.claude-<label>` instead of `~/.claude` |
 
 The installed Claude is never modified.
 
+## Menu bar app
+
+Does everything the script does from the menu bar: shows profiles that are older than the installed Claude and updates them, lists every profile with its folders, opens and quits profiles, and creates, re-icons and removes them.
+
+```bash
+menubar/build.sh --open    # macOS 13+, needs Xcode or the Command Line Tools
+```
+
+Or download `Claude-Profiles-Menu.zip` from [Releases](https://github.com/piotr-liszka/claude-desktop-profiles/releases), unzip it into `~/Applications`, then right-click the app and choose **Open** (it is not notarized).
+
 ## Commands
 
-| Command | What it does |
-| --- | --- |
-| `add <label>` | Create a profile |
-| `list` | Show profiles and whether each is running. `--json` prints them for other programs. |
-| `launch <label>` | Start a profile, or bring it to the front |
-| `quit <label>` | Quit a running profile |
-| `icon <label> --color COLOR` | macOS: change an app copy's icon and keep its data and settings. Instead of `--color`, use `--icon PATH`, `--badge` or `--no-badge`. `--restart` quits and reopens it if it is open. |
-| `update [label]` | Rebuild app copies from the installed Claude (run this after Claude updates). Without a label it rebuilds every profile. `--outdated` skips copies already at the installed version; `--restart` quits open profiles first and reopens them. |
-| `install-updater` | macOS: create `~/Applications/Claude Profiles Updater.app`, which does the update for you (see below) |
-| `env <label>` | Print `export` lines so a terminal can use the profile's settings |
-| `remove <label>` | Delete the profile's app and keep its data |
-| `remove <label> --purge` | Also delete its data and Claude Code folders (asks you to type the label) |
-| `doctor` | Show what was detected on this machine |
-
-Options for `add`:
-
-| Option | Meaning |
-| --- | --- |
-| `--app PATH` | App to use (default: auto-detected Claude Desktop) |
-| `--color COLOR` | Turn the whole icon to this colour instead of adding a badge: a name (`red`, `orange`, `yellow`, `green`, `teal`, `blue`, `purple`, `pink`) or a coloured hex such as `#3b82f6`. Only the hue is used, so grey, black and white are refused. |
-| `--icon PATH` | Your own icon: `.icns`, or an image such as `.png` (square, 1024 px is best). Wins over `--color`. |
-| `--no-badge` | Keep the app's own icon |
-| `--data-dir PATH` | App data folder |
-| `--config-dir PATH` | Claude Code folder (default `~/.claude-<label in lowercase>`) |
-| `--no-config-dir` | Do not give the profile its own Claude Code folder |
-| `--env NAME=VALUE` | Extra environment variable for the app (repeatable) |
-| `--shared-app` | Do not copy the app; start the installed one through a launcher (all profiles then share one Dock tile) |
-| `--dest DIR` | Where the profile is created |
-| `--dry-run` | Show what would happen and change nothing |
-
-Labels may contain letters, digits, `-` and `_`.
-
-## Changing the icon later
-
-Run `add` again for the same label. It rebuilds the app and keeps the profile's data, but the profile must be quit first:
-
 ```bash
-./claude-profiles add Work --color blue
+./claude-profiles add Work --color blue   # create a profile
+./claude-profiles list                    # profiles and whether they run
+./claude-profiles launch Work             # start or show it
+./claude-profiles update --outdated --restart   # after Claude updates
+./claude-profiles remove Work [--purge]   # remove the app (and its data)
 ```
 
-The icon lives inside the profile's app, at `~/Applications/Claude <label>.app/Contents/Resources/profile.icns`. To swap it by hand, replace that file, then sign the app again and refresh the Dock:
-
-```bash
-codesign --force --deep --sign - "$HOME/Applications/Claude Work.app"
-touch "$HOME/Applications/Claude Work.app" && killall Dock
-```
-
-`update` keeps whatever icon the profile has.
-
-## Updating after Claude updates
-
-Profile copies do not update themselves. Let the original Claude install its update, then open **Claude Profiles Updater**. It lists the profiles that are older than the installed Claude, asks before it starts, quits the open ones, rebuilds them and reopens them.
-
-Create it once:
-
-```bash
-./claude-profiles install-updater
-```
-
-It carries its own copy of the script, so run `install-updater` again after you change the script. Its log is `~/Library/Logs/claude-profiles-updater.log`.
-
-Without the app, run `./claude-profiles update --outdated --restart` from Terminal. A profile cannot quit itself, so this refuses to run from a terminal inside a profile it would quit.
-
-## Menu bar app (macOS)
-
-A small app in the menu bar that does everything the script does, without a terminal:
-
-<p>
-  <img src="docs/images/menubar-profiles.png" alt="The menu bar app listing two running profiles, Claude Personal and Claude Work, each with a Show button" width="400">
-  <img src="docs/images/menubar-new-profile.png" alt="The New profile form: a label field, icon choices Badge, Colour, Image and Original, and an Advanced section" width="400">
-</p>
-
-- shows which profiles are older than the installed Claude and updates them (one, or all at once), quitting and reopening open ones
-- lists every profile with its state, version and where its app, data and Claude Code settings are, with buttons to show them in Finder or copy them
-- opens, shows and quits profiles
-- creates profiles (label, badge, colour or your own icon, and the advanced options of `add`), changes a profile's icon and removes a profile, optionally with its data
-- click a profile for its details: app, data folder, Claude Code folder, the app it was built from and its environment
-- copies the terminal command for a profile's Claude Code settings, creates the updater app and shows the `doctor` output
-
-Each [release](https://github.com/piotr-liszka/claude-desktop-profiles/releases) has `Claude-Profiles-Menu.zip`, built from that release's sources by GitHub Actions. Unzip it into `~/Applications`. It is signed ad hoc, not by a registered developer, so macOS blocks the first start: right-click the app, choose **Open**, then **Open** again. Or remove the download mark yourself:
-
-```bash
-xattr -dr com.apple.quarantine "$HOME/Applications/Claude Profiles Menu.app"
-```
-
-Or build it yourself. That needs macOS 13 or later and Apple's Swift compiler, which comes with Xcode or the Command Line Tools (`xcode-select --install`):
-
-```bash
-menubar/build.sh --open
-```
-
-This creates `~/Applications/Claude Profiles Menu.app`. It carries its own copy of `claude-profiles` and runs it for every action, so build it again after you change the script. To start it when you log in, use **Open at Login** in its settings menu. If your profiles are not in `~/Applications`, tell it where they are:
-
-```bash
-defaults write local.claude-profiles.menubar ProfilesDest /path/to/folder
-```
-
-## Claude Code in a terminal
-
-The profile's app uses `~/.claude-<label in lowercase>`. To use the same settings and login from a terminal:
-
-```bash
-eval "$(./claude-profiles env Work)"
-claude
-```
-
-## Platforms
-
-| Platform | Script | Status |
-| --- | --- | --- |
-| macOS | `claude-profiles` | Tested. App copy per profile, own icon, name, data and Claude Code folder. |
-| Linux | `claude-profiles` | Untested. A `.desktop` launcher with its own data folder. Pass the executable with `--app` if it is not found as `claude-desktop`. |
-| Windows | `claude-profiles.ps1` | Experimental, untested. A Start Menu shortcut with its own data folder and icon. No app copy and no separate Claude Code folder yet. No `list --json`, `quit` or menu bar app. |
-
-## Other apps
-
-The script is not tied to Claude. It works with any app that honors the Chromium `--user-data-dir` flag, which Electron apps do:
-
-```bash
-./claude-profiles add Work --app "/Applications/Some App.app" --env SOME_VAR=value
-```
+All commands and options, updating, icons, Linux and Windows: [docs/usage.md](docs/usage.md).
 
 ## Good to know
 
-- **Updates.** Copies do not auto-update, because they are no longer signed by Anthropic. If a profile offers to install an update, close the message: let only the original Claude update, then use the updater app or `update --restart` (see above).
-- **Signing.** Editing the copy breaks its signature, so it is signed ad hoc on your machine. macOS may ask once for Keychain access, and permissions such as camera or screen recording are granted per copy. Features that rely on Anthropic's signature (passkeys, security keys, Microsoft single sign-on) may not work in a copy. If you need them, create that profile with `--shared-app`.
-- **Sign-in.** Sign-in returns to the app through a link that macOS delivers to one app. If it opens the wrong window, quit the other profile while you sign in, then start it again.
-- **Disk space.** Each profile keeps its own data, including anything large the app downloads for itself.
-- **Safety.** The tool only creates files in the folder you give it (`~/Applications` by default) and reads the process list. `--purge` refuses anything that does not look like a dedicated profile folder, never touches `~/.claude` or the app's own default folder, and asks you to type the label first.
+- Copies do not auto-update. Let only the original Claude update, then run `update` or use the menu bar app.
+- Copies are signed ad hoc on your machine. Passkeys, security keys and Microsoft sign-in may not work in a copy; use `add --shared-app` for those.
+- If sign-in opens the wrong window, quit the other profile while you sign in.
 
-## Remove everything
-
-```bash
-./claude-profiles remove Work --purge
-```
-
-## Tests
-
-```bash
-tests/run.sh           # unit and CLI tests in a throwaway HOME, using a fake app
-LIVE=1 tests/run.sh    # also starts the fake app through the generated profiles and draws a badge
-```
-
-## Disclaimer
-
-Unofficial. Not affiliated with or endorsed by Anthropic. Claude is a trademark of Anthropic.
-
-## License
-
-MIT
+Unofficial. Not affiliated with or endorsed by Anthropic. Claude is a trademark of Anthropic. MIT license.

@@ -4,17 +4,17 @@ Guidance for AI agents and contributors working in this repository.
 
 ## What this is
 
-A small, dependency-free tool that gives each account of an Electron desktop app (Claude Desktop by default) its own profile so several accounts can run side by side. On macOS a profile is a copy of the app with its own name, icon, data folder and environment. See `README.md` for usage.
+A small, dependency-free tool that gives each account of an Electron desktop app (Claude Desktop by default) its own profile so several accounts can run side by side. On macOS a profile is a copy of the app with its own name, icon, data folder and environment. See `README.md` and `docs/usage.md` for usage.
 
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
 | `claude-profiles` | Bash script for macOS and Linux. The whole tool lives in this one file. |
-| `claude-profiles.ps1` | PowerShell script for Windows. Fewer features (see the README). |
+| `claude-profiles.ps1` | PowerShell script for Windows. Fewer features (see `docs/usage.md`). |
 | `tests/run.sh` | Tests, run in a throwaway `HOME` against a fake app. `LIVE=1` also starts it. |
 | `menubar/` | macOS menu bar app (SwiftUI, macOS 13+). `build.sh` compiles it with `swiftc` and puts a copy of `claude-profiles` inside it. |
-| `README.md` | User-facing docs. Keep it short and simple. |
+| `README.md` | Short user-facing overview. Details go in `docs/usage.md`. |
 
 ## How a macOS profile works
 
@@ -45,7 +45,7 @@ A small, dependency-free tool that gives each account of an Electron desktop app
 - **Validate input.** Labels are `[A-Za-z0-9_-]`, 32 characters at most. Environment names are `[A-Za-z_][A-Za-z0-9_]*`. Paths are made absolute and `..` is rejected. Quote every expansion; paths contain spaces on macOS (`Application Support`).
 - **Never overwrite something the tool did not create.** Refuse and say why.
 - **Do not touch system settings.** In particular, do not change the default handler for `claude://` or other URL schemes, and do not edit Launch Services or Dock preferences.
-- **Keep parity or document the gap.** A behavior change in `claude-profiles` needs the same change in `claude-profiles.ps1`, or a note in the README's platform table.
+- **Keep parity or document the gap.** A behavior change in `claude-profiles` needs the same change in `claude-profiles.ps1`, or a note in the platform table in `docs/usage.md`.
 
 ## Testing
 
