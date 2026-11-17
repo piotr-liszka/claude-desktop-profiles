@@ -1,0 +1,30 @@
+name: Release
+
+# Push a tag such as v0.3.0 to build the menu bar app and attach it to that release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  menubar:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tests
+        run: tests/run.sh
+      - name: Build the menu bar app (Apple silicon and Intel)
+        run: menubar/build.sh --universal --dest "$RUNNER_TEMP/apps"
+      - name: Zip it
+        run: |
+          cd "$RUNNER_TEMP/apps"
+          ditto -c -k --keepParent "Claude Profiles Menu.app" "$RUNNER_TEMP/Claude-Profiles-Menu.zip"
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$tag" --generate-notes
+          gh release upload "$tag" "$RUNNER_TEMP/Claude-Profiles-Menu.zip" --clobber

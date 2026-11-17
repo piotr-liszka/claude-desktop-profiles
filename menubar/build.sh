@@ -11,12 +11,13 @@ die() { echo "build.sh: $*" >&2; exit 1; }
 
 usage() {
   cat <<USAGE
-Usage: menubar/build.sh [--dest DIR] [--open]
+Usage: menubar/build.sh [--dest DIR] [--open] [--universal]
 
 Builds "$NAME.app" into DIR (default ~/Applications) from the Swift sources next
 to this script, with a copy of claude-profiles inside it.
   --dest DIR   where to put the app
   --open       open it when it is built
+  --universal  build for both Apple silicon and Intel (for releases)
 Run it again after you change claude-profiles or the sources.
 USAGE
 }
@@ -25,10 +26,12 @@ here="$(cd "$(dirname "$0")" && pwd)" || exit 1
 tool="$here/../claude-profiles"
 dest="$HOME/Applications"
 open_it=0
+universal=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dest) [ $# -ge 2 ] || die "--dest needs a value"; dest="$2"; shift 2 ;;
     --open) open_it=1; shift ;;
+    --universal) universal=1; shift ;;
     -h | --help) usage; exit 0 ;;
     *) die "unknown option '$1' (try --help)" ;;
   esac
@@ -51,13 +54,20 @@ mkdir -p "$dest" || die "cannot create $dest"
 rm -rf "$tmp"
 mkdir -p "$tmp/Contents/MacOS" "$tmp/Contents/Resources" || die "cannot create $tmp"
 
-echo "Compiling..." >&2
-if ! swiftc -O -swift-version 5 -parse-as-library \
-    -target "$(uname -m)-apple-macos13.0" \
-    -o "$tmp/Contents/MacOS/$EXE" "$here"/Sources/*.swift; then
-  rm -rf "$tmp"
-  die "compiling failed"
-fi
+if [ "$universal" = 1 ]; then archs="arm64 x86_64"; else archs="$(uname -m)"; fi
+slices=()
+for arch in $archs; do
+  echo "Compiling for $arch..." >&2
+  if ! swiftc -O -swift-version 5 -parse-as-library \
+      -target "$arch-apple-macos13.0" \
+      -o "$tmp/$EXE-$arch" "$here"/Sources/*.swift; then
+    rm -rf "$tmp"
+    die "compiling failed"
+  fi
+  slices[${#slices[@]}]="$tmp/$EXE-$arch"
+done
+lipo -create "${slices[@]}" -output "$tmp/Contents/MacOS/$EXE" || { rm -rf "$tmp"; die "could not combine the builds"; }
+rm -f "${slices[@]}"
 
 cp "$tool" "$tmp/Contents/Resources/claude-profiles" && chmod +x "$tmp/Contents/Resources/claude-profiles" ||
   { rm -rf "$tmp"; die "cannot copy claude-profiles"; }

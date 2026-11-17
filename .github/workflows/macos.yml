@@ -15,7 +15,7 @@ jobs:
       - name: Tests
         run: tests/run.sh
       - name: Build the menu bar app
-        run: menubar/build.sh --dest "$RUNNER_TEMP/apps"
+        run: menubar/build.sh --universal --dest "$RUNNER_TEMP/apps"
       - name: Check the bundle
         run: |
           app="$RUNNER_TEMP/apps/Claude Profiles Menu.app"

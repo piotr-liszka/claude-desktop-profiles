@@ -33,6 +33,7 @@ A small, dependency-free tool that gives each account of an Electron desktop app
 - The app asks for the label to be typed before it passes `--purge --yes`, as the script would in a terminal.
 - `build.sh` marks the bundle with `menubar.conf` and refuses to overwrite a bundle without it. It has no profile.conf, so it is never listed as a profile.
 - It needs Apple's Swift compiler to build. That is a build tool, not a runtime dependency; do not add Swift packages.
+- `release.yml` builds it (universal, ad hoc signed) when a `v*` tag is pushed and attaches `Claude-Profiles-Menu.zip` to that tag's GitHub release. It is not notarized; the README says how to open it.
 - The GitHub workflow builds it on macOS. Do not describe a change to it as tested unless it was built and run on a Mac.
 
 ## Rules

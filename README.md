@@ -100,7 +100,13 @@ A small app in the menu bar that does everything the script does, without a term
 - creates profiles (label, badge, colour or your own icon, and the advanced options of `add`), changes a profile's icon and removes a profile, optionally with its data
 - copies the terminal command for a profile's Claude Code settings, creates the updater app and shows the `doctor` output
 
-Build it once. It needs macOS 13 or later and Apple's Swift compiler, which comes with Xcode or the Command Line Tools (`xcode-select --install`):
+Each [release](https://github.com/piotr-liszka/claude-desktop-profiles/releases) has `Claude-Profiles-Menu.zip`, built from that release's sources by GitHub Actions. Unzip it into `~/Applications`. It is signed ad hoc, not by a registered developer, so macOS blocks the first start: right-click the app, choose **Open**, then **Open** again. Or remove the download mark yourself:
+
+```bash
+xattr -dr com.apple.quarantine "$HOME/Applications/Claude Profiles Menu.app"
+```
+
+Or build it yourself. That needs macOS 13 or later and Apple's Swift compiler, which comes with Xcode or the Command Line Tools (`xcode-select --install`):
 
 ```bash
 menubar/build.sh --open
