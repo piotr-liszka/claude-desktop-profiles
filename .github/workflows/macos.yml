@@ -1,0 +1,25 @@
+name: macOS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-and-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax
+        run: bash -n claude-profiles && bash -n menubar/build.sh
+      - name: Tests
+        run: tests/run.sh
+      - name: Build the menu bar app
+        run: menubar/build.sh --universal --dest "$RUNNER_TEMP/apps"
+      - name: Check the bundle
+        run: |
+          app="$RUNNER_TEMP/apps/Claude Profiles Menu.app"
+          plutil -lint "$app/Contents/Info.plist"
+          test -x "$app/Contents/MacOS/ProfilesMenu"
+          test -x "$app/Contents/Resources/claude-profiles"
+          codesign --verify --deep --strict "$app"

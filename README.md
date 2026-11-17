@@ -30,8 +30,10 @@ The installed Claude is never modified.
 | Command | What it does |
 | --- | --- |
 | `add <label>` | Create a profile |
-| `list` | Show profiles and whether each is running |
+| `list` | Show profiles and whether each is running. `--json` prints them for other programs. |
 | `launch <label>` | Start a profile, or bring it to the front |
+| `quit <label>` | Quit a running profile |
+| `icon <label> --color COLOR` | macOS: change an app copy's icon and keep its data and settings. Instead of `--color`, use `--icon PATH`, `--badge` or `--no-badge`. `--restart` quits and reopens it if it is open. |
 | `update [label]` | Rebuild app copies from the installed Claude (run this after Claude updates). Without a label it rebuilds every profile. `--outdated` skips copies already at the installed version; `--restart` quits open profiles first and reopens them. |
 | `install-updater` | macOS: create `~/Applications/Claude Profiles Updater.app`, which does the update for you (see below) |
 | `env <label>` | Print `export` lines so a terminal can use the profile's settings |
@@ -88,6 +90,34 @@ It carries its own copy of the script, so run `install-updater` again after you 
 
 Without the app, run `./claude-profiles update --outdated --restart` from Terminal. A profile cannot quit itself, so this refuses to run from a terminal inside a profile it would quit.
 
+## Menu bar app (macOS)
+
+A small app in the menu bar that does everything the script does, without a terminal:
+
+- shows which profiles are older than the installed Claude and updates them (one, or all at once), quitting and reopening open ones
+- lists every profile with its state, version and where its app, data and Claude Code settings are, with buttons to show them in Finder or copy them
+- opens, shows and quits profiles
+- creates profiles (label, badge, colour or your own icon, and the advanced options of `add`), changes a profile's icon and removes a profile, optionally with its data
+- copies the terminal command for a profile's Claude Code settings, creates the updater app and shows the `doctor` output
+
+Each [release](https://github.com/piotr-liszka/claude-desktop-profiles/releases) has `Claude-Profiles-Menu.zip`, built from that release's sources by GitHub Actions. Unzip it into `~/Applications`. It is signed ad hoc, not by a registered developer, so macOS blocks the first start: right-click the app, choose **Open**, then **Open** again. Or remove the download mark yourself:
+
+```bash
+xattr -dr com.apple.quarantine "$HOME/Applications/Claude Profiles Menu.app"
+```
+
+Or build it yourself. That needs macOS 13 or later and Apple's Swift compiler, which comes with Xcode or the Command Line Tools (`xcode-select --install`):
+
+```bash
+menubar/build.sh --open
+```
+
+This creates `~/Applications/Claude Profiles Menu.app`. It carries its own copy of `claude-profiles` and runs it for every action, so build it again after you change the script. To start it when you log in, use **Open at Login** in its settings menu. If your profiles are not in `~/Applications`, tell it where they are:
+
+```bash
+defaults write local.claude-profiles.menubar ProfilesDest /path/to/folder
+```
+
 ## Claude Code in a terminal
 
 The profile's app uses `~/.claude-<label in lowercase>`. To use the same settings and login from a terminal:
@@ -103,7 +133,7 @@ claude
 | --- | --- | --- |
 | macOS | `claude-profiles` | Tested. App copy per profile, own icon, name, data and Claude Code folder. |
 | Linux | `claude-profiles` | Untested. A `.desktop` launcher with its own data folder. Pass the executable with `--app` if it is not found as `claude-desktop`. |
-| Windows | `claude-profiles.ps1` | Experimental, untested. A Start Menu shortcut with its own data folder and icon. No app copy and no separate Claude Code folder yet. |
+| Windows | `claude-profiles.ps1` | Experimental, untested. A Start Menu shortcut with its own data folder and icon. No app copy and no separate Claude Code folder yet. No `list --json`, `quit` or menu bar app. |
 
 ## Other apps
 

@@ -23,9 +23,12 @@ $TOOL $VERSION: run several signed-in profiles of a desktop app side by side
 
 Usage:
   $TOOL add <label> [options]      create a profile: its own app, icon, data and settings
-  $TOOL list                       show profiles and whether they are running
+  $TOOL list [--json]              show profiles and whether they are running
   $TOOL launch <label>             start a profile, or bring it to the front
+  $TOOL quit <label>               quit a running profile
   $TOOL update [label]             rebuild app copies from the installed app (all, or one label)
+  $TOOL icon <label> <choice>      macOS: change an app copy's icon and keep everything else;
+                                   choice is --color COLOR, --icon PATH, --badge or --no-badge
   $TOOL install-updater            macOS: create an app that runs 'update --outdated --restart' for you
   $TOOL env <label>                print export lines so a terminal can use the profile's settings
   $TOOL remove <label> [--purge]   delete the profile's app (and optionally its data)
@@ -53,6 +56,10 @@ Options for add:
 Options for update:
   --outdated          only rebuild copies whose version differs from the installed app
   --restart           quit open profiles first and reopen them when rebuilt
+                      (also accepted by icon)
+
+Options for list:
+  --json              print the profiles as JSON, for other programs (the menu bar app)
 
 Other options: --purge and -y/--yes (with remove).
 Labels may contain letters, digits, '-' and '_'.
@@ -508,7 +515,7 @@ make_linux_launcher() { # name label app data_dir dest icon env_lines
     echo "Exec=\"$script\""
     echo "Terminal=false"
     echo "Categories=Network;"
-    [ -n "$icon" ] && echo "Icon=$icon"
+    if [ -n "$icon" ]; then echo "Icon=$icon"; fi
   } > "$desktop" || die "cannot write $desktop"
   write_conf "$desktop" "$label" "$app" "$data_dir" shared "$env_lines"
   echo "${KEY_PREFIX}SCRIPT=$script" >> "$desktop"
@@ -544,7 +551,7 @@ find_launcher() { # dest label -> the matching list_launchers line
 
 parse_opts() {
   OPT_APP="" OPT_DATA_DIR="" OPT_DEST="" OPT_ICON="" OPT_COLOR="" OPT_CONFIG_DIR="" OPT_ENV=""
-  OPT_NO_BADGE=0 OPT_NO_CONFIG=0 OPT_SHARED=0 OPT_DRY=0 OPT_PURGE=0 OPT_YES=0 OPT_OUTDATED=0 OPT_RESTART=0 LABEL=""
+  OPT_NO_BADGE=0 OPT_NO_CONFIG=0 OPT_SHARED=0 OPT_DRY=0 OPT_PURGE=0 OPT_YES=0 OPT_OUTDATED=0 OPT_RESTART=0 OPT_JSON=0 OPT_BADGE=0 LABEL=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --app)        [ $# -ge 2 ] || die "--app needs a value";        OPT_APP="$2"; shift 2 ;;
@@ -557,6 +564,8 @@ parse_opts() {
                     shift 2 ;;
       --env)        [ $# -ge 2 ] || die "--env needs a value"; check_env_pair "$2"; OPT_ENV="$OPT_ENV$2"$'\n'; shift 2 ;;
       --no-badge)      OPT_NO_BADGE=1; shift ;;
+      --badge)         OPT_BADGE=1; shift ;;
+      --json)          OPT_JSON=1; shift ;;
       --no-config-dir) OPT_NO_CONFIG=1; shift ;;
       --shared-app)    OPT_SHARED=1; shift ;;
       --purge)         OPT_PURGE=1; shift ;;
@@ -595,6 +604,10 @@ cmd_add() {
   if [ "$OPT_SHARED" = 1 ] && [ "$OS" != macos ]; then warn "--shared-app has no effect on this platform"; fi
   if [ -n "$OPT_COLOR" ] && [ "$mode" != copy ]; then warn "--color only applies to app copies; ignoring it"; fi
   if [ -n "$OPT_COLOR" ] && [ -n "$OPT_ICON" ]; then warn "--icon wins over --color"; fi
+  if [ -n "$OPT_ICON" ]; then
+    OPT_ICON=$(absolute_path "$OPT_ICON") || exit 1
+    [ -f "$OPT_ICON" ] || die "no such icon file: $OPT_ICON"
+  fi
 
   if [ -n "$OPT_DATA_DIR" ]; then
     data_dir=$(absolute_path "$OPT_DATA_DIR") || exit 1
@@ -652,6 +665,7 @@ EOF
 }
 
 cmd_list() {
+  if [ "$OPT_JSON" = 1 ]; then list_json; return; fi
   local line label path app data pid status mode conf found=0
   while IFS= read -r line; do
     found=1
@@ -684,6 +698,107 @@ cmd_launch() {
 
 app_version() { # bundle
   printf '%s (%s)' "$(plist_get "$1/Contents/Info.plist" CFBundleShortVersionString)" "$(plist_get "$1/Contents/Info.plist" CFBundleVersion)"
+}
+
+# A JSON string. Paths and values never hold a newline (add refuses them).
+json_str() {
+  printf '"%s"' "$(printf '%s' "$1" | tr -d '\000-\010\012-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g')"
+}
+
+json_version() { # bundle -> {"version": ..., "build": ...} or null
+  if [ "$OS" = macos ] && [ -f "$1/Contents/Info.plist" ]; then
+    printf '{"version":%s,"build":%s}' "$(json_str "$(plist_get "$1/Contents/Info.plist" CFBundleShortVersionString)")" "$(json_str "$(plist_get "$1/Contents/Info.plist" CFBundleVersion)")"
+  else
+    printf 'null'
+  fi
+}
+
+# Everything 'list' knows, as one JSON object, for programs such as the menu bar app.
+# "outdated" uses the same test as 'update --outdated'.
+list_json() {
+  local line label path app data conf mode pid cfg l sep="" esep outdated app_ok detected
+  printf '{"tool":%s,"version":%s,"os":%s,"dest":%s,' "$(json_str "$TOOL")" "$(json_str "$VERSION")" "$(json_str "$OS")" "$(json_str "$DEST")"
+  if detected=$(default_app); then
+    printf '"app":{"path":%s,"name":%s,"defaultDataDir":%s,"bundle":%s},' "$(json_str "$detected")" "$(json_str "$(app_name "$detected")")" \
+      "$(json_str "$(default_profile_dir "$(app_name "$detected")")")" "$(json_version "$detected")"
+  else
+    printf '"app":null,'
+  fi
+  printf '"profiles":['
+  while IFS= read -r line; do
+    IFS=$'\t' read -r label path app data <<<"$line"
+    conf=$(launcher_conf "$path")
+    mode=$(conf_get "$conf" "$(ckey MODE)")
+    pid=$(find_pid "$data")
+    cfg=$(conf_all "$conf" "$(ckey ENV)" | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -n 1)
+    app_ok=false; { [ -d "$app" ] || [ -x "$app" ]; } && app_ok=true
+    outdated=false
+    if [ "$OS" = macos ] && [ "$mode" = copy ] && [ "$app_ok" = true ] && [ "$(app_version "$path")" != "$(app_version "$app")" ]; then outdated=true; fi
+    printf '%s{"label":%s,"path":%s,"mode":%s,"app":%s,"appExists":%s,"dataDir":%s,"configDir":%s,' "$sep" \
+      "$(json_str "$label")" "$(json_str "$path")" "$(json_str "${mode:-shared}")" "$(json_str "$app")" "$app_ok" "$(json_str "$data")" "$(json_str "$cfg")"
+    printf '"customIcon":%s,"running":%s,"pid":%s,"outdated":%s,"bundle":%s,"appBundle":%s,"env":[' \
+      "$([ -f "$path/Contents/Resources/profile.icns" ] && echo true || echo false)" \
+      "$([ -n "$pid" ] && echo true || echo false)" "${pid:-null}" "$outdated" "$(json_version "$path")" "$(json_version "$app")"
+    esep=""
+    while IFS= read -r l; do
+      [ -n "$l" ] || continue
+      printf '%s%s' "$esep" "$(json_str "$l")"; esep=","
+    done < <(conf_all "$conf" "$(ckey ENV)")
+    printf ']}'
+    sep=","
+  done < <(list_launchers "$DEST")
+  printf ']}\n'
+}
+
+cmd_quit() {
+  [ -n "$LABEL" ] || die "quit needs a label"
+  local line label path app data pid
+  line=$(find_launcher "$DEST" "$LABEL") || die "no profile with label '$LABEL' in $DEST"
+  IFS=$'\t' read -r label path app data <<<"$line"
+  pid=$(find_pid "$data")
+  if [ -z "$pid" ]; then echo "not running: $LABEL"; return 0; fi
+  runs_inside "$pid" && die "this command runs inside '$LABEL', so it cannot quit it"
+  if [ "$OS" = macos ]; then
+    quit_profile "$data" || die "profile '$LABEL' did not quit; it may be asking you something"
+  else
+    kill -TERM "$pid" 2>/dev/null || die "could not quit '$LABEL' (pid $pid)"
+  fi
+  echo "quit: $LABEL"
+}
+
+# Rebuilds an app copy with another icon, keeping its data, settings and environment.
+cmd_icon() {
+  [ "$OS" = macos ] || die "icon only applies to app copies, which are macOS-only"
+  [ -n "$LABEL" ] || die "icon needs a label"
+  local n=0 line label path app data conf icon="" no_badge=0 pid rc
+  [ -n "$OPT_COLOR" ] && n=$((n + 1))
+  [ -n "$OPT_ICON" ] && n=$((n + 1))
+  [ "$OPT_BADGE" = 1 ] && n=$((n + 1))
+  [ "$OPT_NO_BADGE" = 1 ] && n=$((n + 1))
+  [ "$n" = 1 ] || die "icon needs exactly one of --color COLOR, --icon PATH, --badge or --no-badge"
+  line=$(find_launcher "$DEST" "$LABEL") || die "no profile with label '$LABEL' in $DEST"
+  IFS=$'\t' read -r label path app data <<<"$line"
+  conf=$(launcher_conf "$path")
+  [ "$(conf_get "$conf" MODE)" = copy ] || die "'$LABEL' is a --shared-app launcher; run 'add $LABEL --shared-app --icon PATH' instead"
+  [ -d "$app" ] || die "'$app' (needed for '$LABEL') no longer exists"
+  if [ -n "$OPT_ICON" ]; then
+    icon=$(absolute_path "$OPT_ICON") || exit 1
+    [ -f "$icon" ] || die "no such icon file: $OPT_ICON"
+  fi
+  [ "$OPT_NO_BADGE" = 1 ] && no_badge=1
+  if [ "$OPT_DRY" = 1 ]; then echo "would rebuild: $path with a new icon"; return 0; fi
+  pid=$(find_pid "$data")
+  if [ -n "$pid" ]; then
+    [ "$OPT_RESTART" = 1 ] || die "profile '$LABEL' is running; quit it first or pass --restart"
+    runs_inside "$pid" && die "this command runs inside '$LABEL', so it cannot quit it"
+    quit_profile "$data" || die "profile '$LABEL' did not quit; quit it yourself and try again"
+  fi
+  ( make_macos_copy "$(basename "$path" .app)" "$label" "$app" "$data" "$(dirname "$path")" "$icon" "$no_badge" "$(conf_all "$conf" ENV)" "$OPT_COLOR" >/dev/null )
+  rc=$?
+  [ -z "$pid" ] || open "$path" || warn "could not reopen '$path'"
+  [ "$rc" = 0 ] || exit 1
+  touch "$path"
+  echo "updated icon: $path${pid:+ (reopened)}"
 }
 
 # True when this script runs inside the process PID (e.g. a terminal in that app).
@@ -936,7 +1051,7 @@ main() {
   local cmd="${1:-help}"
   [ $# -gt 0 ] && shift
   case "$cmd" in
-    add | list | launch | update | env | remove | doctor) parse_opts "$@"; "cmd_$cmd" ;;
+    add | list | launch | quit | icon | update | env | remove | doctor) parse_opts "$@"; "cmd_$cmd" ;;
     install-updater) parse_opts "$@"; cmd_install_updater ;;
     -h | --help | help) usage ;;
     -V | --version | version) echo "$TOOL $VERSION" ;;
