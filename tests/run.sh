@@ -186,6 +186,17 @@ echo "== list / update"
 tool list >"$WORK/list.out" 2>&1
 has "$WORK/list.out" "^Work" && has "$WORK/list.out" "stopped" && has "$WORK/list.out" "FOO=bar" && ok "list shows the profile, its state and env" || bad "list shows the profile, its state and env"
 tool list --dest "$WORK/empty" 2>&1 | grep -q "no profiles" && ok "list on an empty folder" || bad "list on an empty folder"
+
+# A JSON check that needs nothing extra: python3 where it exists, plutil on macOS.
+valid_json() { if command -v python3 >/dev/null; then python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$1"; else plutil -convert xml1 -o /dev/null "$1"; fi; }
+tool list --json >"$WORK/list.json" 2>/dev/null
+valid_json "$WORK/list.json" && ok "list --json is valid JSON" || bad "list --json is valid JSON"
+has "$WORK/list.json" '"label":"Work"' && has "$WORK/list.json" '"FOO=bar"' && has "$WORK/list.json" '"running":false' && ok "list --json has the label, env and state" || bad "list --json has the label, env and state"
+has "$WORK/list.json" "\"configDir\":\"$HOME/.cfg-work\"" && ok "list --json has the Claude Code folder" || bad "list --json has the Claude Code folder"
+tool list --json --dest "$WORK/empty" | grep -q '"profiles":\[\]' && ok "list --json on an empty folder" || bad "list --json on an empty folder"
+equals "$(json_str 'a"b\c	d')" '"a\"b\\c\td"' && ok "json_str escapes quotes, backslashes and tabs" || bad "json_str escapes quotes, backslashes and tabs"
+tool quit Work 2>&1 | grep -q "^not running" && ok "quit on a stopped profile says so" || bad "quit on a stopped profile says so"
+expect_fail "quit of an unknown label fails" tool quit Nope
 expect_ok "adding again regenerates the profile" tool add Work --app "$FAKE" --no-badge --env FOO=bar --config-dir "$HOME/.cfg-work"
 if [ "$OS" = macos ]; then
   expect_ok "update rebuilds the copy" tool update Work
@@ -202,7 +213,23 @@ if [ "$OS" = macos ]; then
   tool update Work --outdated 2>&1 | grep -q "^up to date: " && ok "--outdated skips a copy at the installed version" || bad "--outdated skips a copy at the installed version"
   plist_set "$FAKE/Contents/Info.plist" CFBundleShortVersionString 2.0
   tool update Work --outdated --dry-run 2>&1 | grep -q "^would rebuild: .*1.0.*-> 2.0" && ok "--outdated --dry-run shows the version change" || bad "--outdated --dry-run shows the version change"
+  tool list --json | grep -q '"label":"Work"[^}]*"outdated":true' && ok "list --json marks an older copy as outdated" || bad "list --json marks an older copy as outdated"
   tool update Work --outdated 2>&1 | grep -q "^updated: " && ok "--outdated rebuilds an older copy" || bad "--outdated rebuilds an older copy"
+  tool list --json | grep -q '"label":"Work"[^}]*"outdated":false' && ok "list --json clears outdated after the update" || bad "list --json clears outdated after the update"
+
+  echo "== icon"
+  expect_fail "icon needs a choice" tool icon Work
+  expect_fail "icon takes only one choice" tool icon Work --badge --no-badge
+  expect_fail "icon refuses a missing file" tool icon Work --icon "$WORK/nope.png"
+  expect_ok "icon --icon sets a custom icon" tool icon Work --icon "$WORK/icon.png"
+  [ -s "$(lpath Work)/Contents/Resources/profile.icns" ] && ok "the copy has the new icon" || bad "the copy has the new icon"
+  has "$(lpath Work)/Contents/MacOS/profile-launch" "FOO=bar" && has "$(lpath Work)/Contents/MacOS/profile-launch" "$HOME/.cfg-work" && ok "icon keeps the environment and Claude Code folder" || bad "icon keeps the environment and Claude Code folder"
+  expect_ok "icon --no-badge goes back to the app's icon" tool icon Work --no-badge
+  [ ! -e "$(lpath Work)/Contents/Resources/profile.icns" ] && ok "the custom icon is gone" || bad "the custom icon is gone"
+  expect_ok "the copy is still validly signed" codesign --verify --deep --strict "$(lpath Work)"
+  tool add SharedIcon --app "$FAKE" --shared-app --no-config-dir >/dev/null 2>&1
+  expect_fail "icon refuses a shared-app launcher" tool icon SharedIcon --badge
+  tool remove SharedIcon >/dev/null 2>&1
   equals "$(plist_get "$(lpath Work)/Contents/Info.plist" CFBundleShortVersionString)" 2.0 && ok "the rebuilt copy has the new version" || bad "the rebuilt copy has the new version"
 
   echo "== install-updater"
@@ -219,6 +246,7 @@ if [ "$OS" = macos ]; then
   rm -rf "$U"
 else
   expect_fail "update is macOS-only" tool update Work
+  expect_fail "icon is macOS-only" tool icon Work --badge
 fi
 
 echo "== remove"
@@ -253,6 +281,18 @@ expect_fail "safe_to_purge: a relative path" safe_to_purge "p/q/profile" "$FAKE"
 expect_fail "safe_to_purge: a symlink" safe_to_purge "$HOME/p/q/link" "$FAKE"
 expect_fail "safe_to_purge: a missing folder" safe_to_purge "$HOME/p/q/missing" "$FAKE"
 expect_ok   "safe_to_purge: a dedicated profile folder" safe_to_purge "$HOME/p/q/profile" "$FAKE"
+
+echo "== menu bar app build script"
+expect_ok "build.sh is valid bash" bash -n menubar/build.sh
+expect_ok "build.sh --help" menubar/build.sh --help
+expect_fail "build.sh rejects unknown options" menubar/build.sh --nope
+if [ "$OS" = macos ]; then
+  mkdir -p "$WORK/menu/Claude Profiles Menu.app"
+  expect_fail "build.sh refuses to overwrite an app it did not create" menubar/build.sh --dest "$WORK/menu"
+  [ -d "$WORK/menu/Claude Profiles Menu.app" ] && ok "the foreign app is untouched" || bad "the foreign app is untouched"
+else
+  expect_fail "build.sh is macOS-only" menubar/build.sh --dest "$WORK/menu"
+fi
 
 if [ "${BADGE:-0}" = 1 ] || [ "${LIVE:-0}" = 1 ]; then
   if [ "$OS" = macos ]; then
@@ -308,11 +348,15 @@ if [ "${LIVE:-0}" = 1 ]; then
   equals "$(count Live)" 1 && ok "a second launch does not start a duplicate" || bad "a second launch does not start a duplicate"
   expect_fail "remove refuses a running profile" tool remove Live
   expect_fail "update refuses a running profile" tool update Live
+  tool list --json | grep -q '"label":"Live"[^}]*"running":true,"pid":[0-9]' && ok "list --json shows the running pid" || bad "list --json shows the running pid"
   if [ "$OS" = macos ]; then
     QUIT_WAIT=1 tool update Live --restart >"$WORK/restart.out" 2>&1
     has "$WORK/restart.out" "updated: .*(reopened)" && ok "update --restart quits, rebuilds and reopens" || bad "update --restart quits, rebuilds and reopens"
     pid2=$(wait_for_pid "$(dpath Live)")
     [ -n "$pid2" ] && [ "$pid2" != "$pid" ] && ok "the profile is running again after --restart" || bad "the profile is running again after --restart"
+    expect_fail "icon refuses a running profile without --restart" tool icon Live --no-badge
+    QUIT_WAIT=1 tool quit Live >/dev/null 2>&1
+    [ -z "$(find_pid "$(dpath Live)")" ] && ok "quit stops a running profile" || bad "quit stops a running profile"
   fi
   pkill -f -- "$(PATTERN Live)"; sleep 1
   tool remove Live >/dev/null 2>&1

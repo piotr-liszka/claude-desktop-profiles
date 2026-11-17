@@ -13,6 +13,7 @@ A small, dependency-free tool that gives each account of an Electron desktop app
 | `claude-profiles` | Bash script for macOS and Linux. The whole tool lives in this one file. |
 | `claude-profiles.ps1` | PowerShell script for Windows. Fewer features (see the README). |
 | `tests/run.sh` | Tests, run in a throwaway `HOME` against a fake app. `LIVE=1` also starts it. |
+| `menubar/` | macOS menu bar app (SwiftUI, macOS 13+). `build.sh` compiles it with `swiftc` and puts a copy of `claude-profiles` inside it. |
 | `README.md` | User-facing docs. Keep it short and simple. |
 
 ## How a macOS profile works
@@ -24,6 +25,15 @@ A small, dependency-free tool that gives each account of an Electron desktop app
 - `update --restart` quits a profile through `NSRunningApplication.terminate` (like its Quit menu), falls back to SIGTERM, rebuilds, then reopens it. It refuses when it runs inside the profile it would quit (`runs_inside`).
 - `install-updater` builds `<App> Profiles Updater.app`: a bash entry point (`write_updater_script`) plus a copy of this script, asking through `osascript` dialogs. It is marked with `updater.conf`, not `profile.conf`, so it is never listed as a profile.
 - `--shared-app` and Linux use a launcher instead. The launcher functions (`match_main_pid`, `find_pid`, `activate_pid`, `launch_profile`) are copied into each generated script with `declare -f`, so they may use only system tools and no globals.
+
+## Menu bar app
+
+- It holds no profile logic of its own. Every action runs the bundled `claude-profiles` (`list --json`, `launch`, `quit`, `update --restart`, `add`, `icon --restart`, `remove [--purge --yes]`, `env`, `doctor`, `install-updater`). Add new behavior to the script first, then call it from the app.
+- `list --json` is the app's only input. Keep its fields stable; add fields rather than renaming them, and update `Model.swift` with them.
+- The app asks for the label to be typed before it passes `--purge --yes`, as the script would in a terminal.
+- `build.sh` marks the bundle with `menubar.conf` and refuses to overwrite a bundle without it. It has no profile.conf, so it is never listed as a profile.
+- It needs Apple's Swift compiler to build. That is a build tool, not a runtime dependency; do not add Swift packages.
+- The GitHub workflow builds it on macOS. Do not describe a change to it as tested unless it was built and run on a Mac.
 
 ## Rules
 
