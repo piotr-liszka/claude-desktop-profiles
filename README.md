@@ -14,6 +14,8 @@ Open `~/Applications/Claude Work.app`, sign in to the account you want in that p
 
 No dependencies and nothing to install: it is one script that uses only tools macOS already has. Read it before you run it.
 
+Prefer clicking to typing? The [menu bar app](#menu-bar-app-macos) does the same from the macOS menu bar.
+
 ## What each profile gets (macOS)
 
 | | |
@@ -94,10 +96,16 @@ Without the app, run `./claude-profiles update --outdated --restart` from Termin
 
 A small app in the menu bar that does everything the script does, without a terminal:
 
+<p>
+  <img src="docs/images/menubar-profiles.png" alt="The menu bar app listing two running profiles, Claude Personal and Claude Work, each with a Show button" width="400">
+  <img src="docs/images/menubar-new-profile.png" alt="The New profile form: a label field, icon choices Badge, Colour, Image and Original, and an Advanced section" width="400">
+</p>
+
 - shows which profiles are older than the installed Claude and updates them (one, or all at once), quitting and reopening open ones
 - lists every profile with its state, version and where its app, data and Claude Code settings are, with buttons to show them in Finder or copy them
 - opens, shows and quits profiles
 - creates profiles (label, badge, colour or your own icon, and the advanced options of `add`), changes a profile's icon and removes a profile, optionally with its data
+- click a profile for its details: app, data folder, Claude Code folder, the app it was built from and its environment
 - copies the terminal command for a profile's Claude Code settings, creates the updater app and shows the `doctor` output
 
 Each [release](https://github.com/piotr-liszka/claude-desktop-profiles/releases) has `Claude-Profiles-Menu.zip`, built from that release's sources by GitHub Actions. Unzip it into `~/Applications`. It is signed ad hoc, not by a registered developer, so macOS blocks the first start: right-click the app, choose **Open**, then **Open** again. Or remove the download mark yourself:
